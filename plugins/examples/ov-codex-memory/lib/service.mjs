@@ -1,6 +1,7 @@
 import { deviceOf, idOf, textOf } from "./ids.mjs"
 import { stopResult, userPromptSubmit } from "./codex.mjs"
-import { recallBlock } from "./recall-text.mjs"
+import { planRecall, queryHash } from "./recall-query.mjs"
+import { byScore, hitsFrom, renderRecall } from "./recall-text.mjs"
 import { ovSessionId } from "./store.mjs"
 
 const MAX_TEXT = 16000
@@ -32,9 +33,29 @@ function promptMatches(row, who) {
     && row.prompt.trim().length > 0
 }
 
+function redactQueries(message, queries) {
+  let out = message
+  const secrets = queries.filter((query) => typeof query === "string" && query.length >= 8)
+  secrets.sort((a, b) => b.length - a.length)
+  for (const query of secrets) out = out.split(query).join("[query]")
+  return out.slice(0, 900)
+}
+
+async function runFind(ov, stage, signal) {
+  const qhash = queryHash(stage.query)
+  try {
+    const body = await ov.find(stage.query, stage.options, signal)
+    const hits = hitsFrom(body, stage.bucket)
+    return { name: stage.name, ok: true, kind: "ok", count: hits.length, hits, qhash }
+  } catch (error) {
+    return { name: stage.name, ok: false, kind: kindOf(error), count: 0, hits: [], qhash }
+  }
+}
+
 /**
- * Remember the prompt, then search. Search failure still leaves a matching
- * prompt stored when there is room. Recall text is bounded.
+ * Remember the original prompt, then read OpenViking with find().
+ * The stored prompt is not the retrieval suffix. Search failure still
+ * leaves a matching prompt stored when there is room.
  */
 export async function hookContext(store, ov, args, signal) {
   const who = pair(args)
@@ -43,17 +64,50 @@ export async function hookContext(store, ov, args, signal) {
     return userPromptSubmit("", "ov-codex-memory: empty prompt, nothing stored and nothing searched")
   }
   const saved = await store.savePrompt(who.device, who.sessionId, who.turnId, prompt)
-  let note = ""
+  const plan = planRecall(prompt)
+  const primary = plan.stages.filter((stage) => stage.name !== "memory-full")
+  const fallback = plan.stages.find((stage) => stage.name === "memory-full")
+  const ran = await Promise.all(primary.map((stage) => runFind(ov, stage, signal)))
+  const memory = ran.find((stage) => stage.name === "memory")
+  let backup
+  if (!fallback) {
+    backup = { name: "memory-full", ok: true, kind: "na", count: 0, hits: [], qhash: "" }
+  } else if (signal?.aborted || (memory.ok && memory.hits.length > 0)) {
+    backup = { name: "memory-full", ok: true, kind: "skip", count: 0, hits: [], qhash: queryHash(fallback.query) }
+  } else {
+    backup = await runFind(ov, fallback, signal)
+  }
+  const skill = ran.find((stage) => stage.name === "skill")
+  const resource = ran.find((stage) => stage.name === "resource")
+  const memoryHits = memory.ok && memory.hits.length ? memory.hits : backup.hits
+  const rendered = renderRecall({
+    memories: byScore(memoryHits).slice(0, 5),
+    skills: byScore(skill.hits).slice(0, 2),
+    resources: byScore(resource.hits).slice(0, 2),
+  })
+  const stages = [memory, backup, skill, resource]
+  const attempted = stages.filter((stage) => stage.kind !== "skip" && stage.kind !== "na")
+  const anyOk = attempted.some((stage) => stage.ok)
+  const anyBad = attempted.some((stage) => !stage.ok)
+  let head = "ov-codex-memory: recall"
+  if (!anyOk && anyBad) head = "ov-codex-memory: recall failed; the prompt was saved for capture."
+  else if (anyOk && anyBad) head = "ov-codex-memory: recall partial"
+  const summary = stages.map((stage) => stage.name + ":" + stage.kind + ":" + stage.count).join(" ")
+  const hashes = []
+  for (const stage of stages) {
+    if (stage.kind === "skip" || stage.kind === "na" || !stage.qhash) continue
+    if (!hashes.includes(stage.qhash)) hashes.push(stage.qhash)
+  }
+  const uris = rendered.uris.slice(0, 5).map((uri) => uri.replaceAll(",", "%2C")).join(",")
+  let message = head + " " + summary + " focus:" + (plan.focus ? "1" : "0") + " qh:" + hashes.join(",")
+  if (uris) message += " uri:" + uris
   if (!saved.stored && saved.reason === "full") {
-    note = "ov-codex-memory: prompt store is full, so this prompt was not saved and will not be captured."
+    message = "ov-codex-memory: prompt store is full, so this prompt was not saved and will not be captured. " + message
   }
-  try {
-    const found = await ov.find(prompt.slice(0, 4000), signal)
-    return userPromptSubmit(recallBlock(found), note)
-  } catch (error) {
-    const why = note || "ov-codex-memory: recall failed; the prompt was saved for capture."
-    return userPromptSubmit("", why + " " + clip(error))
-  }
+  const queries = plan.stages.map((stage) => stage.query)
+  message = redactQueries(message, queries)
+  if (typeof ov.scrub === "function") message = ov.scrub(message).slice(0, 900)
+  return userPromptSubmit(rendered.text, message)
 }
 
 /**

@@ -15,17 +15,44 @@ plugin's library server keeps this folder's name.
 ## What it does
 
 `hook_context` runs from Codex `UserPromptSubmit`. It stores the prompt under
-the device label, `session_id`, and `turn_id`, searches OpenViking with
-`POST /api/v1/search/find`, and returns only JSON Codex accepts for that event:
+the device label, `session_id`, and `turn_id`, then reads OpenViking with
+`POST /api/v1/search/find` only. It returns only JSON Codex accepts for that event:
 
 ```json
 {"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"<ov-codex-context>\n...\n</ov-codex-context>"}}
 ```
 
-Recalled text is untrusted data inside that delimiter, cut to 2000 characters.
-Tags that would close the delimiter are neutralized. The search body is not
-returned raw: Codex rejects unexpected fields (`deny_unknown_fields` on
+Recalled text is untrusted data inside that delimiter. The body is at most
+2000 characters, and each hit has its own cap, so one long abstract cannot
+crowd out a later one. Memories, skills, and resources are separate
+sections. A hit shows its `viking://` uri and its abstract. Overview and
+file content are not copied into the block. The model can open a uri with
+the existing OpenViking read tool. This plugin does not read those files
+and does not run commands found in notes. Tags that would close the
+delimiter are neutralized. The search body is not returned raw: Codex
+rejects unexpected fields (`deny_unknown_fields` on
 `UserPromptSubmitCommandOutputWire`).
+
+The memory find is scoped to `viking://~/memories` with `context_type`
+`memory` and `limit` 5. Skill and resource finds use the same primary
+query, limits 2, and their own `context_type`, with no memory scope mixed
+in. A short prompt, a single paragraph, a fenced block with short lines,
+and a balanced multiline question are sent whole. A longer prompt is also
+searched as its final line only when that line is a question or a short
+last line, and it is at most half as long as every earlier line. That is a
+structural split, not a model and not a language-specific name list. The
+stored prompt is never replaced by that line. If the short find returns no
+memories or fails, one memory find of the full prompt (first 4000
+characters) runs as a fallback. `search`, including `mode=context`, is not
+called: on 0.5.4 that mode still vector-searches the query it is given, it
+rejects `target_uri`, and session expansion or rewrite can call the
+server's planner. Those model calls stay off.
+
+`systemMessage` records stage, status, counts, whether a focus query was
+used, a 16-character hash of each query that was sent, and the injected
+uris. It does not include the query text, abstracts, or response bodies.
+The count is how many hits the find returned. The uri list is what was
+injected after the per-hit budget.
 
 `hook_capture` runs from Codex `Stop`. It writes the stored prompt and the
 assistant text into one OpenViking session, then commits with
@@ -149,9 +176,31 @@ is not repeated. `archived: false` is settled and is not repeated.
 An abort or error before the dispatch flag does not append. Assistant text
 from a failed Stop is not marked captured.
 
+## One read-only check
+
+Do this on the computer where OpenViking is already listening, only when a
+person asks for it. It does not call `hook_context`, so it does not write
+the plugin's prompt store. It does not create a session, append, commit, or
+extract. With an empty `api_key`, send no `Authorization` header.
+
+Use the question span, not a long instruction preamble. A canned fixture in
+the tests is not this check, and this check is not a new Codex conversation.
+
+```sh
+curl -sS -X POST http://127.0.0.1:1933/api/v1/search/find \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"QUESTION SPAN ONLY","limit":5,"target_uri":"viking://~/memories","context_type":"memory"}'
+```
+
+Replace `QUESTION SPAN ONLY` with the short question. Read the `memories`
+uris and abstracts. Do not treat a hit as proof of what an earlier hook
+request returned.
+
 ## Limits
 
-- Search is `find` with limit 5, not the gateway hook's context-mode recall.
+- Recall is scoped `find`, not `search` and not context mode. Context mode
+  would not by itself fix an instruction-heavy query, because 0.5.4 still
+  embeds the query it is given.
 - Pairing is the device label plus `session_id` plus `turn_id`. The stored
   prompt record must carry those same three values. A mismatch does not
   capture.
@@ -181,4 +230,6 @@ node --test test/plugin.test.mjs
 The same file in the git tree is
 `plugins/examples/ov-codex-memory/test/plugin.test.mjs`. The tests use a fake
 OpenViking client and one local hung HTTP server. They do not call a real
-OpenViking, a real Codex, or a live Magpie.
+OpenViking, a real Codex, or a live Magpie. A fixture that returns a chosen
+fact proves the plugin asked the focus query and did not drop that canned
+hit. It does not prove the live index returns that fact for that query.

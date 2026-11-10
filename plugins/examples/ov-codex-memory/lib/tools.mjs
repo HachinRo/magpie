@@ -22,7 +22,7 @@ function tool(description, properties, required, run) {
 export function createTools({ store, ov }) {
   return {
     hook_context: tool(
-      "Codex UserPromptSubmit hook only. Saves the prompt and returns Codex hook JSON with bounded untrusted OpenViking notes. Does not call a chat model.",
+      "Codex UserPromptSubmit hook only. Saves the prompt and returns Codex hook JSON with bounded untrusted OpenViking notes from read-only find. Does not call a chat model.",
       { query: string, session_id: id, turn_id: id, device: { type: "string", minLength: 1, maxLength: 64 } },
       ["query", "session_id", "turn_id", "device"],
       (args, signal) => hookContext(store, ov, args, signal),

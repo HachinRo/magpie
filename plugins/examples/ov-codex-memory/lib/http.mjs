@@ -77,8 +77,21 @@ export function createClient(cfg, fetchImpl = globalThis.fetch) {
   }
 
   return {
-    find(query, signal) {
-      return call("/api/v1/search/find", { method: "POST", body: { query, limit: 5 }, signal })
+    // Read-only vector find. Options are an allow-list: limit, target_uri,
+    // and context_type. read_content, session_id, and search mode are not
+    // forwarded. A second argument that is an AbortSignal is the signal.
+    find(query, options, signal) {
+      if (options && typeof options === "object" && typeof options.aborted === "boolean" && signal === undefined) {
+        signal = options
+        options = undefined
+      }
+      const body = { query: String(query ?? "").slice(0, 4000), limit: 5 }
+      if (options && typeof options === "object") {
+        if (Number.isInteger(options.limit) && options.limit >= 1 && options.limit <= 10) body.limit = options.limit
+        if (typeof options.target_uri === "string" && options.target_uri) body.target_uri = options.target_uri
+        if (typeof options.context_type === "string" && options.context_type) body.context_type = options.context_type
+      }
+      return call("/api/v1/search/find", { method: "POST", body, signal })
     },
     ensureSession(sessionId, signal) {
       return call("/api/v1/sessions", {
