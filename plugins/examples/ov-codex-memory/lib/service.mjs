@@ -34,9 +34,13 @@ function promptMatches(row, who) {
 }
 
 async function readTopMemories(ov, hits, signal) {
+  // find.abstract on a level-2 memory file is already the file body.
+  // Reading it again does not add a missing tail, so only an empty
+  // abstract is worth a read.
   if (typeof ov.readMemory !== "function" || signal?.aborted) return { kind: "na", count: 0 }
   const targets = []
   for (const hit of hits) {
+    if (hit.abstract) continue
     if (!memoryFileUri(hit.uri)) continue
     targets.push(hit)
     if (targets.length === 2) break
@@ -46,7 +50,7 @@ async function readTopMemories(ov, hits, signal) {
     try {
       const body = await ov.readMemory(hit.uri, signal)
       const detail = fileDetail(body)
-      if (!detail || detail.length < hit.abstract.length) return false
+      if (!detail) return false
       hit.detail = detail
       return true
     } catch {
@@ -57,14 +61,18 @@ async function readTopMemories(ov, hits, signal) {
   return { kind: count ? "ok" : "fallback", count }
 }
 
-function withOneBackup(primary, backup) {
+function mergeMemories(primary, backup) {
   const ranked = byScore(primary)
+  if (!ranked.length) return byScore(backup).slice(0, 5)
   const seen = new Set(ranked.map((hit) => hit.uri).filter(Boolean))
+  const out = ranked.slice(0, 5)
+  if (out.length >= 5) return out
   for (const hit of byScore(backup)) {
     if (hit.uri && seen.has(hit.uri)) continue
-    return ranked.concat(hit)
+    out.push(hit)
+    break
   }
-  return ranked
+  return out
 }
 
 function redactQueries(message, queries) {
@@ -109,10 +117,10 @@ export async function hookContext(store, ov, args, signal) {
   }
   const skill = ran.find((stage) => stage.name === "skill")
   const resource = ran.find((stage) => stage.name === "resource")
-  const memoryHits = memory.ok && memory.hits.length
-    ? withOneBackup(memory.hits, backup.hits)
-    : backup.hits
-  const rankedMemories = byScore(memoryHits).slice(0, 5)
+  const rankedMemories = mergeMemories(
+    memory.ok ? memory.hits : [],
+    backup.hits,
+  )
   const read = await readTopMemories(ov, rankedMemories, signal)
   const rendered = renderRecall({
     memories: rankedMemories,

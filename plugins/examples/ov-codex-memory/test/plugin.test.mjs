@@ -1164,13 +1164,9 @@ test("the saved five-memory shape keeps the full top abstract and still lists th
   assert.equal(block.includes("SECRET-OVERVIEW"), false)
 })
 
-test("a short find abstract is replaced by the memory file, and other scopes are not read", async () => {
-  // Shape from the 0.1.4 Windows recall: find named the entity and returned
-  // a generic blurb; the durable fact was in the file read, not that blurb.
-  // The strings are fixture data. They do not prove a live find.
-  const generic = "A fictional archivist used as a synthetic OpenViking automatic-memory performance-test entity."
+test("an empty memory abstract can be filled from the file, and a present abstract is not read again", async () => {
   const fact = "Catalogs river-reed folios every Wednesday only. Marker SYN-OV-PERF-20261110T2259SGT-FENNEL7042. Codeword FENNEL-NETTLE-WEDNESDAY-7042."
-  const file = "# Archivist Example\n\n" + generic + "\n\n## Activities\n- " + fact + "\n"
+  const file = "# Archivist Example\n\n## Activities\n- " + fact + "\n"
   const top = "viking://user/default/memories/entities/person_role/example_archivist.md"
   const second = "viking://user/default/memories/entities/person_role/example_other.md"
   const rig = await setup()
@@ -1186,7 +1182,7 @@ test("a short find abstract is replaced by the memory file, and other scopes are
     if (options?.context_type === "memory") {
       return {
         memories: [
-          hit(top, generic, 0.9),
+          hit(top, "", 0.9),
           hit(second, "Other generic blurb.", 0.8),
           hit("viking://user/default/memories/entities/person_role/", "directory", 0.7),
           hit("viking://user/default/memories/entities/person_role/third.md", "Third " + "t".repeat(400), 0.6),
@@ -1206,10 +1202,11 @@ test("a short find abstract is replaced by the memory file, and other scopes are
     assert.equal(block.includes("FENNEL-NETTLE-WEDNESDAY-7042"), true)
     assert.equal(block.includes("example_archivist.md"), true)
     assert.equal(block.includes("example_other.md"), true)
-    assert.equal(block.includes("Second file body"), true)
+    assert.equal(block.includes("Other generic blurb."), true)
+    assert.equal(block.includes("Second file body"), false)
     assert.equal(block.includes("t".repeat(300)), false)
-    assert.deepEqual(reads, [top, second])
-    assert.match(text.systemMessage, /read:ok:2/)
+    assert.deepEqual(reads, [top])
+    assert.match(text.systemMessage, /read:ok:1/)
     assert.equal(text.systemMessage.includes(fact), false)
     assert.equal(memoryFileUri("viking://user/default/memories/../../etc/passwd.md"), "")
     assert.equal(memoryFileUri("viking://user:secret@host/memories/a.md"), "")
@@ -1228,16 +1225,16 @@ test("a failed or oversized memory read keeps the find abstract", async () => {
   rig.ov.find = async (query, options) => {
     rig.ov.calls.push(["find", query, options])
     if (options?.context_type !== "memory") return {}
-    return { memories: [hit(uri, "GENERIC-BLURB-ONLY", 0.8)] }
+    return { memories: [hit(uri, "", 0.8)] }
   }
   try {
     const failed = assertUserPromptSubmit(await rig.context())
-    assert.equal(failed.hookSpecificOutput.additionalContext.includes("GENERIC-BLURB-ONLY"), true)
+    assert.equal(failed.hookSpecificOutput.additionalContext.includes(uri), true)
     assert.match(failed.systemMessage, /read:fallback:0/)
     rig.ov.readMemory = async () => "Z".repeat(9000)
     const huge = assertUserPromptSubmit(await rig.context({ turn_id: "turn-2" }))
-    assert.equal(huge.hookSpecificOutput.additionalContext.includes("GENERIC-BLURB-ONLY"), true)
     assert.equal(huge.hookSpecificOutput.additionalContext.includes("Z".repeat(100)), false)
+    assert.match(huge.systemMessage, /read:fallback:0/)
   } finally {
     await rm(rig.dir, { recursive: true, force: true })
   }
@@ -1269,4 +1266,59 @@ test("content read is a capped GET and find still cannot ask for read_content", 
     assert.match(error.message, /too large/)
     return true
   })
+})
+
+test("the focused memory keeps its full abstract when a higher-scored full-prompt hit and a 50000-character abstract are also returned", async () => {
+  // Current-index shapes from the two saved finds. Not a claim that the
+  // 23:31 payload was byte-identical. The plugin must not special-case names.
+  const body = "# Archivist Soren Nettlebrook\nA fictional archivist used as a synthetic OpenViking automatic-memory performance-test entity, not a real person.\n\n## Role\n- Archivist named Soren Nettlebrook.\n- Fictional test entity, not a real person or user fact.\n\n## Activities\n- Catalogs river-reed folios every Wednesday only.\n\n## Test Reference\n- Unique test marker: SYN-OV-PERF-20261110T2259SGT-FENNEL7042\n- Test codeword: FENNEL-NETTLE-WEDNESDAY-7042\n- Recorded in the session of 2026-11-10."
+  assert.equal(body.length, 480)
+  const soren = "viking://user/default/memories/entities/person_role/soren_nettlebrook.md"
+  const focusQuestion = "What is recorded about the fictional entity Archivist Soren Nettlebrook?"
+  const fullPrompt = "This is not a coding or repository task. Stay in this scratch folder. Do not read or search the user's files, configs, secrets, logs, or other projects. Do not start curl or any HTTP client of your own. Do not print or request credentials. Do not call remember, find, read, hook_context, hook_capture, hook_task, Linear, computer, or any other tool.\n\nWhat is recorded about the fictional entity Archivist Soren Nettlebrook? Answer only from context already available in this conversation. If you do not know, say so and stop."
+  assert.equal(focusQuestion.length, 72)
+  assert.equal(fullPrompt.length, 525)
+  assert.equal(focusOf(fullPrompt), focusQuestion)
+  const rig = await setup()
+  let reads = 0
+  rig.ov.readMemory = async () => { reads += 1; return body }
+  rig.ov.find = async (query, options) => {
+    rig.ov.calls.push(["find", query, options])
+    if (options?.context_type !== "memory") return { memories: [], resources: [], skills: [] }
+    if (query === focusQuestion) {
+      return { memories: [
+        { uri: soren, abstract: body, score: 0.8026260137557983 },
+        { uri: "viking://user/default/memories/entities/person_role/linnea_quillfort.md", abstract: "x".repeat(466), score: 0.7300919890403748 },
+        { uri: "viking://user/default/memories/entities/person_role/mira_pebblewick.md", abstract: "x".repeat(467), score: 0.7240108251571655 },
+        { uri: "viking://user/default/memories/other/fourth.md", abstract: "x".repeat(122), score: 0.7207762002944946 },
+        { uri: "viking://user/default/memories/entities/person_role/.overview.md", abstract: "x".repeat(335), score: 0.7173269987106323 },
+      ] }
+    }
+    return { memories: [
+      { uri: "viking://user/default/memories/other/higher.md", abstract: "H".repeat(486), score: 0.8788728713989258 },
+      { uri: "viking://user/default/memories/entities/person_role/.overview.md", abstract: "x".repeat(335), score: 0.8685810565948486 },
+      { uri: "viking://user/default/memories/other/huge.md", abstract: "U".repeat(50000), score: 0.8632594347000122 },
+      { uri: "viking://user/default/memories/other/fourth-full.md", abstract: "x".repeat(411), score: 0.8607016205787659 },
+      { uri: soren, abstract: body, score: 0.8601630926132202 },
+    ] }
+  }
+  try {
+    const text = assertUserPromptSubmit(await rig.tools.hook_context.execute({
+      ...rig.base, query: fullPrompt,
+    }, {}))
+    const block = text.hookSpecificOutput.additionalContext
+    assert.equal(block.includes("FENNEL-NETTLE-WEDNESDAY-7042"), true)
+    assert.equal(block.includes("SYN-OV-PERF-20261110T2259SGT-FENNEL7042"), true)
+    assert.equal(block.includes("river-reed"), true)
+    assert.equal(block.includes("Wednesday"), true)
+    assert.equal(block.includes(soren), true)
+    assert.equal(block.split(soren).length - 1, 1)
+    assert.equal(block.includes("U".repeat(200)), false)
+    assert.equal(reads, 0)
+    assert.match(text.systemMessage, /read:na:0/)
+    const saved = await rig.store.readPrompt("win-codex", "sess-1", "turn-1")
+    assert.equal(saved.prompt, fullPrompt)
+  } finally {
+    await rm(rig.dir, { recursive: true, force: true })
+  }
 })

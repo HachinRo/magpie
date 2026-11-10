@@ -11,7 +11,7 @@ const CLOSE = "</ov-codex-context>"
 export const RECALL_CHARS = 2000
 
 const SECTION_BUDGET = { memory: 1400, skill: 300, resource: 300 }
-const TOP_ABSTRACT = 1200
+const TOP_ABSTRACT = 700
 const OTHER_ABSTRACT = 180
 const MAX_HITS = { memory: 5, skill: 2, resource: 2 }
 

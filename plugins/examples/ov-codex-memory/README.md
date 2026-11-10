@@ -53,16 +53,17 @@ the query it is given, it rejects `target_uri`, and session expansion or
 rewrite can call the server's planner. Those model calls stay off.
 
 The finds start together. Each find uses `timeoutMs` (default 8000,
-allowed 100 to 15000). After those finds return, at most two memory
-files are read together with `GET /api/v1/content/read?uri=...&offset=0&limit=40`.
-`raw` is not sent. Each read waits at most 2 seconds and refuses a body
-over 12000 characters. A file body longer than the find abstract replaces
-it, and that text is capped at 700 characters. A failed, directory, or
-oversized read keeps the abstract. Skills, resources, directory URIs, and
-`.abstract.md` / `.overview.md` sidecars are not read. The find wave is
-one `timeoutMs`. The reads add at most 2 seconds. The sample Codex hook
-allows 20 seconds, so the default 8 seconds and the maximum 15 seconds,
-plus the read, finish inside it.
+allowed 100 to 15000). The focused memory hits stay in front. A hit from
+the full-prompt find is not moved ahead of them, and a duplicate URI is
+kept once. The first memory hit is kept up to 700 characters, so a normal
+memory file is not cut to make room for a later abstract. Other hits stay
+at 180 characters. A 50000-character abstract cannot take that first slot
+away from the focused hit. A file read happens only when a memory-file
+hit has an empty abstract, at most two of them, with
+`GET /api/v1/content/read?uri=...&offset=0&limit=40`. `raw` is not sent.
+Each such read waits at most 2 seconds and refuses a body over 12000
+characters. The find wave is one `timeoutMs`. Those reads, when they
+happen, add at most 2 seconds. The sample Codex hook allows 20 seconds.
 Capture is unchanged and is three calls in sequence (session, append,
 commit). Three defaults are 24 seconds and three maxima are 45 seconds,
 both longer than the 20 second Stop hook. A slow capture can be cut off.
