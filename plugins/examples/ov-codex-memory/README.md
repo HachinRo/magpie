@@ -77,37 +77,40 @@ Optional plugin options:
 ```
 
 `timeoutMs` is an integer from 100 to 15000. The default is 8000. State is
-under `dataDir` or `~/.openviking/ov-codex-memory/`, mode 0600 files, at most
-200 stored prompts and 500 turn records.
+under `dataDir` or `~/.openviking/ov-codex-memory/`. That directory must be a
+real directory, not a symlink. It is chmod 0700, and the files inside are
+0600. `ovcli.conf` must be a regular file of at most 64KiB. A symlink config
+is refused.
 
 ## Codex hooks
 
-Use a Codex build that executes `mcp_tool` hooks. The handler shipped in
-openai/codex PR 38705 (merged 2026-08-15). Older builds that only parse the
-handler and skip it (PR 37363) will not recall or capture. This repo was
-checked against `codex-rs/hooks/src/schema.rs` on Codex `main`: `mcp_tool`
-calls an already-connected server, and the tool text is parsed as hook stdout.
-No Codex binary was run here.
+Checked by reading `openai/codex` `main`, not by running Codex.
 
-`UserPromptSubmit` input used here is `prompt`, `session_id`, and `turn_id`.
-`Stop` input used here is `session_id`, `turn_id`, and `last_assistant_message`.
-Those names are the fields on `UserPromptSubmitCommandInput` and
-`StopCommandInput`. `Stop` has no prompt field. Pairing works only when both
-hooks see the same `session_id` and `turn_id`. If they differ, capture fails
-closed and does not store the assistant text.
+- `mcp_tool` execution is the behavior in PR 38705 (merged 2026-08-15). PR
+  37363 only parsed the handler and skipped it. A build that skips will not
+  recall or capture.
+- `hooks/codex.hooks.json` uses the published handler fields: `type`,
+  `server`, `tool`, `input`, `timeout`, and `statusMessage`.
+- Both `UserPromptSubmitCommandInput` and `StopCommandInput` are serialized
+  with serde's default names (no `rename_all`). The event JSON therefore has
+  `session_id`, `turn_id`, and, on submit, `prompt`. Stop has
+  `last_assistant_message` (`NullableString`: a string or `null`) and does
+  not have `prompt`. The sample's `${turn_id}` is the same field name on
+  both events. This source check does not prove a live turn puts the same
+  value in both events. If it does not, capture finds no prompt and does not
+  write the assistant text.
+- A missing placeholder fails in Codex before this plugin is called. A null
+  `last_assistant_message` arrives as null and is not captured.
+- User and project hooks do not run for Codex's internal memory-consolidation
+  Stop (`runs_for_memory_consolidation` is false for those sources). This
+  sample does not read `stop_hook_active`. It does not invent a host signal
+  that two events are one turn beyond the shared field names above.
+- `SessionEnd` cannot run `mcp_tool`. Do not point `hook_task` at a hook.
 
 Copy `hooks/codex.hooks.json` into Codex's user hooks. Replace the server name
-with the hub entry already in Codex's config (the one whose URL is the
-remote Magpie hub). Set `device` to a stable label for this machine. Do not
-add an `Authorization` header, a bearer token, or a copied key. The hook uses
-the connection Codex already has.
-
-`features.hooks` must not be false. `SessionEnd` cannot run `mcp_tool`. Do not
-point `hook_task` at a hook: its JSON is not Stop output.
-
-A missing `${last_assistant_message}` fails in Codex before this plugin is
-called, because a missing placeholder is an error. Null assistant text is
-rejected here and is not captured.
+with the hub entry already in Codex's config. Set `device` to a label for
+this machine. Do not add an `Authorization` header or a copied key. The hook
+uses the connection Codex already has. `features.hooks` must not be false.
 
 ## DSH
 
@@ -118,17 +121,41 @@ copy a gateway key into an environment variable. A DSH adapter would need that
 host API, or a separate credential the user configures on purpose. Neither is
 this plugin.
 
+## Delivery
+
+OpenViking append and commit are not idempotent. `source_message_ids` are
+provenance, not a supported idempotency key, so this plugin does not retry
+from a session read. Capture is at-most-once, not exactly-once.
+
+The local phase is fsynced before the request (`append-dispatched`, then
+`commit-dispatched`). A crash, timeout, abort, or HTTP 408/409/429/5xx after
+that flag leaves the turn `ambiguous`. A later Stop does not append or commit
+again. The request may never have reached OpenViking, or it may have landed.
+Reconcile that OpenViking session by hand. A definite HTTP 4xx on append
+(other than those statuses) returns the turn to `armed` and a later Stop may
+send once more. A commit body without a boolean `archived` is ambiguous and
+is not repeated. `archived: false` is settled and is not repeated.
+`archived: true` is not extraction success.
+
+An abort or error before the dispatch flag does not append. Assistant text
+from a failed Stop is not marked captured.
+
 ## Limits
 
 - Search is `find` with limit 5, not the gateway hook's context-mode recall.
-- One archive per device, session id, and turn id. A later Stop for that same
-  triple does not commit again, including after a process restart.
-- A continued turn that reuses the same turn id is not a second capture.
-- Prompt and assistant text are stored up to 16000 characters each.
-- `archived: true` does not mean memories are searchable yet.
-- A crash after OpenViking accepts the append and before the local
-  `appended` flag is written can append the pair again on retry. Retries
-  after that flag, and after `accepted` or `settled`, do not.
+- Pairing is the device label plus `session_id` plus `turn_id`. The stored
+  prompt record must carry those same three values. A mismatch does not
+  capture.
+- A lock is taken only when its pid is dead, or when it is empty and at least
+  a second old. A live pid is never stolen. If that pid is reused by an
+  unrelated process, the lock stays until that process exits.
+- At most 200 prompt files. Prompts for turns that are not finished are kept.
+  The capture ledger keeps up to 2000 turn records and then refuses new
+  turns instead of deleting old ones.
+- Prompt and assistant text are stored up to 16000 characters each, and are
+  removed from the local record once the turn is terminal.
+- This is a Codex prototype. It is not DSH automatic memory and it does not
+  cover every client on the LAN.
 - The plugin does not route models and does not change Cheap First or local
   embeddings. Extraction, if OpenViking schedules it, uses whatever model
   OpenViking is already configured to call on this computer.

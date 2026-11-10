@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -8,6 +8,7 @@ import { assertStop, assertUserPromptSubmit } from "../lib/codex.mjs"
 import { loadConfig } from "../lib/config.mjs"
 import { createClient } from "../lib/http.mjs"
 import { assertLoopback } from "../lib/loopback.mjs"
+import { OvError } from "../lib/http.mjs"
 import { createStore, ovSessionId } from "../lib/store.mjs"
 import { createTools } from "../lib/tools.mjs"
 
@@ -51,7 +52,7 @@ function fakeOv(overrides = {}) {
 
 async function setup() {
   const dir = await mkdtemp(join(tmpdir(), "ov-codex-"))
-  const store = createStore(dir)
+  const store = await createStore(dir)
   const ov = fakeOv()
   const tools = createTools({ store, ov })
   const base = { device: "win-codex", session_id: "sess-1", turn_id: "turn-1" }
@@ -120,7 +121,7 @@ test("retry, a second Stop, and a restarted process do not commit again", async 
     await rig.context()
     await rig.capture()
     await rig.capture()
-    const restarted = createTools({ store: createStore(rig.dir), ov: rig.ov })
+    const restarted = createTools({ store: await createStore(rig.dir), ov: rig.ov })
     await restarted.hook_capture.execute({ ...rig.base, assistant: "I will use tea." }, {})
     assert.equal(rig.ov.calls.filter((call) => call[0] === "commit").length, 1)
     assert.equal(rig.ov.calls.filter((call) => call[0] === "add").length, 1)
@@ -217,11 +218,11 @@ test("a commit that does not archive is not extraction, and a task read is separ
   try {
     await rig.context()
     const text = assertStop(await rig.capture())
-    assert.match(text.systemMessage, /archived is false/)
+    assert.match(text.systemMessage, /archived false/)
     assert.doesNotMatch(text.systemMessage, /extraction task/)
     const again = assertStop(await rig.capture())
-    assert.match(again.systemMessage, /archived is false/)
-    assert.equal(rig.ov.calls.filter((call) => call[0] === "commit").length, 2)
+    assert.match(again.systemMessage, /already settled/)
+    assert.equal(rig.ov.calls.filter((call) => call[0] === "commit").length, 1)
     rig.ov.getTask = async () => ({ status: "running" })
     const running = JSON.parse(await rig.tools.hook_task.execute({ task_id: "task-9" }, {}))
     assert.equal(running.extractionComplete, false)
@@ -240,8 +241,7 @@ test("no_messages after a recorded append is not sent again", async () => {
     await rig.context()
     await rig.capture()
     const turn = await rig.store.readTurn("win-codex", "sess-1", "turn-1")
-    turn.phase = "committing"
-    turn.appended = true
+    turn.phase = "appended"
     const { writeFile } = await import("node:fs/promises")
     await writeFile(join(rig.dir, "turns", rig.store.key("win-codex", "sess-1", "turn-1") + ".json"), JSON.stringify(turn))
     rig.ov.calls.length = 0
@@ -251,7 +251,8 @@ test("no_messages after a recorded append is not sent again", async () => {
       return { status: "skipped", archived: false, task_id: null, reason: "no_messages" }
     }
     const text = assertStop(await rig.capture())
-    assert.match(text.systemMessage, /not sent again/)
+    assert.match(text.systemMessage, /archived false/)
+    assert.match(text.systemMessage, /not committed again/)
     assert.equal(rig.ov.calls.some((call) => call[0] === "add"), false)
     assert.equal(rig.ov.calls.filter((call) => call[0] === "commit").length, 1)
   } finally {
@@ -324,6 +325,159 @@ test("the package is tools only and does not name the existing OpenViking tools"
   } finally {
     if (previous === undefined) delete process.env.OPENVIKING_CLI_CONFIG_FILE
     else process.env.OPENVIKING_CLI_CONFIG_FILE = previous
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test("an ambiguous append is not retried, and a rejected append may be", async () => {
+  const ambiguous = await setup()
+  const rejected = await setup()
+  try {
+    ambiguous.ov.addPair = async () => {
+      ambiguous.ov.calls.push(["add"])
+      throw new OvError("ov-codex-memory: OpenViking request timed out or was cancelled", "timeout")
+    }
+    await ambiguous.context()
+    const first = assertStop(await ambiguous.capture())
+    assert.match(first.systemMessage, /not retried/)
+    assert.match(first.systemMessage, /at-most-once/)
+    const second = assertStop(await ambiguous.capture())
+    assert.match(second.systemMessage, /not retried/)
+    assert.equal(ambiguous.ov.calls.filter((call) => call[0] === "add").length, 1)
+    const saved = await ambiguous.store.readTurn("win-codex", "sess-1", "turn-1")
+    assert.equal(saved.phase, "ambiguous")
+    assert.equal(saved.prompt, undefined)
+    assert.equal(saved.assistant, undefined)
+
+    let adds = 0
+    rejected.ov.addPair = async (id, messages) => {
+      adds += 1
+      rejected.ov.calls.push(["add", id, messages])
+      if (adds === 1) throw new OvError("ov-codex-memory: OpenViking HTTP 400", "rejected", 400)
+    }
+    await rejected.context()
+    const denied = assertStop(await rejected.capture())
+    assert.match(denied.systemMessage, /rejected the append/)
+    const accepted = assertStop(await rejected.capture())
+    assert.match(accepted.systemMessage, /archive accepted/)
+    assert.equal(adds, 2)
+  } finally {
+    await rm(ambiguous.dir, { recursive: true, force: true })
+    await rm(rejected.dir, { recursive: true, force: true })
+  }
+})
+
+test("a dispatch flag without a response is not sent again", async () => {
+  const rig = await setup()
+  try {
+    await rig.context()
+    const turn = {
+      v: 2, device: "win-codex", sessionId: "sess-1", turnId: "turn-1", phase: "append-dispatched",
+    }
+    await writeFile(join(rig.dir, "turns", rig.store.key("win-codex", "sess-1", "turn-1") + ".json"), JSON.stringify(turn))
+    const text = assertStop(await rig.capture())
+    assert.match(text.systemMessage, /not retried/)
+    assert.equal(rig.ov.calls.some((call) => call[0] === "add" || call[0] === "commit"), false)
+  } finally {
+    await rm(rig.dir, { recursive: true, force: true })
+  }
+})
+
+test("a malformed commit response is not committed again", async () => {
+  const rig = await setup()
+  rig.ov.commit = async () => {
+    rig.ov.calls.push(["commit"])
+    return { status: "ok" }
+  }
+  try {
+    await rig.context()
+    const text = assertStop(await rig.capture())
+    assert.match(text.systemMessage, /not retried/)
+    assertStop(await rig.capture())
+    assert.equal(rig.ov.calls.filter((call) => call[0] === "commit").length, 1)
+  } finally {
+    await rm(rig.dir, { recursive: true, force: true })
+  }
+})
+
+test("prompt identity must match the turn, and a symlink state file is refused", async () => {
+  const rig = await setup()
+  try {
+    await rig.context()
+    const key = rig.store.key("win-codex", "sess-1", "turn-1")
+    const promptFile = join(rig.dir, "prompts", key + ".json")
+    const row = JSON.parse(await readFile(promptFile, "utf8"))
+    row.turnId = "other-turn"
+    await writeFile(promptFile, JSON.stringify(row))
+    const mismatch = assertStop(await rig.capture())
+    assert.match(mismatch.systemMessage, /no matching prompt/)
+    assert.equal(rig.ov.calls.some((call) => call[0] === "add"), false)
+    row.turnId = "turn-1"
+    await writeFile(promptFile, JSON.stringify(row))
+    await rm(promptFile)
+    await symlink("/etc/hostname", promptFile)
+    await assert.rejects(() => rig.capture(), /regular file/)
+    assert.equal(rig.ov.calls.some((call) => call[0] === "add"), false)
+  } finally {
+    await rm(rig.dir, { recursive: true, force: true })
+  }
+})
+
+test("locks of a live process are kept and locks of a dead process are taken", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ov-lock-"))
+  try {
+    const store = await createStore(dir, { lockWaitMs: 80 })
+    await store.plantLock("win-codex", "sess-1", "turn-1", process.pid)
+    await assert.rejects(
+      () => store.lockTurn("win-codex", "sess-1", "turn-1", async () => "entered"),
+      /timed out waiting/,
+    )
+    await store.plantLock("win-codex", "sess-2", "turn-1", 2147483646, { old: true })
+    const entered = await store.lockTurn("win-codex", "sess-2", "turn-1", async () => "entered")
+    assert.equal(entered, "entered")
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test("a symlink data directory is refused and state files are private", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ov-perm-"))
+  const link = join(dir, "link")
+  const real = join(dir, "real")
+  await mkdir(real)
+  await symlink(real, link)
+  try {
+    await assert.rejects(() => createStore(link), /symlink/)
+    const store = await createStore(real)
+    await store.savePrompt("win-codex", "sess-1", "turn-1", "tea")
+    const file = join(real, "prompts", store.key("win-codex", "sess-1", "turn-1") + ".json")
+    const fileMode = (await lstat(file)).mode & 0o777
+    const dirMode = (await lstat(real)).mode & 0o777
+    assert.equal(fileMode, 0o600)
+    assert.equal(dirMode, 0o700)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test("the capture ledger stops accepting new turns instead of forgetting old ones", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ov-full-"))
+  try {
+    const store = await createStore(dir, { maxLedger: 1 })
+    const ov = fakeOv()
+    const tools = createTools({ store, ov })
+    const one = { device: "win-codex", session_id: "sess-1", turn_id: "turn-1", query: "one" }
+    const two = { device: "win-codex", session_id: "sess-2", turn_id: "turn-2", query: "two" }
+    await tools.hook_context.execute(one, {})
+    await tools.hook_capture.execute({ ...one, assistant: "done" }, {})
+    await tools.hook_context.execute(two, {})
+    const blocked = assertStop(await tools.hook_capture.execute({ ...two, assistant: "done" }, {}))
+    assert.match(blocked.systemMessage, /ledger is full/)
+    assert.equal(ov.calls.filter((call) => call[0] === "add").length, 1)
+    const again = assertStop(await tools.hook_capture.execute({ ...one, assistant: "done" }, {}))
+    assert.match(again.systemMessage, /already archived/)
+    assert.equal(ov.calls.filter((call) => call[0] === "commit").length, 1)
+  } finally {
     await rm(dir, { recursive: true, force: true })
   }
 })

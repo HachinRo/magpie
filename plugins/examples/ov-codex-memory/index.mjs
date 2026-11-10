@@ -10,7 +10,7 @@ async function open(options, env) {
   const dataDir = typeof options?.dataDir === "string" && options.dataDir.trim()
     ? options.dataDir.trim()
     : join(homedir(), ".openviking", "ov-codex-memory")
-  return { store: createStore(dataDir), ov: createClient(cfg) }
+  return { store: await createStore(dataDir), ov: createClient(cfg) }
 }
 
 // Tools only. No onRequest, onResponse, or magpie.hooks, so a model call

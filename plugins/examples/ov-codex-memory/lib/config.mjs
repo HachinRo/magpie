@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises"
+import { lstat, readFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { assertLoopback } from "./loopback.mjs"
@@ -26,6 +26,8 @@ export async function loadConfig(env, options, home) {
   const file = configFile(env, home)
   let parsed = {}
   try {
+    const info = await lstat(file)
+    if (!info.isFile() || info.size > 65536) throw new Error("ov-codex-memory: ovcli.conf cannot be read")
     parsed = JSON.parse(await readFile(file, "utf8"))
   } catch (error) {
     if (error.code !== "ENOENT") throw new Error("ov-codex-memory: ovcli.conf cannot be read")

@@ -1,9 +1,10 @@
 import { deviceOf, idOf, textOf } from "./ids.mjs"
 import { stopResult, userPromptSubmit } from "./codex.mjs"
 import { recallBlock } from "./recall-text.mjs"
-import { ovSessionId, sourceId } from "./store.mjs"
+import { ovSessionId } from "./store.mjs"
 
 const MAX_TEXT = 16000
+const TERMINAL = new Set(["accepted", "settled", "ambiguous"])
 
 function pair(args) {
   return {
@@ -13,13 +14,27 @@ function pair(args) {
   }
 }
 
-function contains(body, id) {
-  return JSON.stringify(body ?? "").includes(id)
+function clip(error) {
+  return String(error?.message || "failed").replace(/\s+/g, " ").slice(0, 180)
+}
+
+function kindOf(error) {
+  if (error?.kind === "rejected" || error?.kind === "ambiguous" || error?.kind === "timeout") return error.kind
+  return "ambiguous"
+}
+
+function promptMatches(row, who) {
+  return !!row
+    && row.device === who.device
+    && row.sessionId === who.sessionId
+    && row.turnId === who.turnId
+    && typeof row.prompt === "string"
+    && row.prompt.trim().length > 0
 }
 
 /**
- * Remember the prompt, then search. A search failure still leaves the
- * prompt stored so a later capture can pair it. Recall text is bounded.
+ * Remember the prompt, then search. Search failure still leaves a matching
+ * prompt stored when there is room. Recall text is bounded.
  */
 export async function hookContext(store, ov, args, signal) {
   const who = pair(args)
@@ -27,23 +42,25 @@ export async function hookContext(store, ov, args, signal) {
   if (!prompt) {
     return userPromptSubmit("", "ov-codex-memory: empty prompt, nothing stored and nothing searched")
   }
-  await store.savePrompt(who.device, who.sessionId, who.turnId, prompt)
+  const saved = await store.savePrompt(who.device, who.sessionId, who.turnId, prompt)
+  let note = ""
+  if (!saved.stored && saved.reason === "full") {
+    note = "ov-codex-memory: prompt store is full, so this prompt was not saved and will not be captured."
+  }
   try {
     const found = await ov.find(prompt.slice(0, 4000), signal)
-    return userPromptSubmit(recallBlock(found))
+    return userPromptSubmit(recallBlock(found), note)
   } catch (error) {
-    return userPromptSubmit("", "ov-codex-memory: recall failed; the prompt was saved for capture. " + clip(error))
+    const why = note || "ov-codex-memory: recall failed; the prompt was saved for capture."
+    return userPromptSubmit("", why + " " + clip(error))
   }
 }
 
-function clip(error) {
-  return String(error?.message || "failed").replace(/\s+/g, " ").slice(0, 240)
-}
-
 /**
- * Capture the user prompt stored for this device, session and turn together
- * with the assistant text. Assistant-only input is not written.
- * archived:true is phase 1. task status is a separate read.
+ * At-most-once capture. OpenViking message append and commit are not
+ * idempotent. A dispatch flag is made durable before the request. If the
+ * process stops after that flag and before a definite response, the turn
+ * is marked ambiguous and is not sent again.
  */
 export async function hookCapture(store, ov, args, signal) {
   const who = pair(args)
@@ -51,77 +68,143 @@ export async function hookCapture(store, ov, args, signal) {
   if (!assistant) {
     return stopResult("ov-codex-memory: no assistant text, so this turn was not captured")
   }
-  const promptRow = await store.readPrompt(who.device, who.sessionId, who.turnId)
-  if (!promptRow || typeof promptRow.prompt !== "string" || !promptRow.prompt.trim()) {
-    return stopResult("ov-codex-memory: no prompt stored for this device, session_id and turn_id. The assistant text was not captured. hook_context must run first with the same three values.")
+  if (signal?.aborted) {
+    return stopResult("ov-codex-memory: capture was cancelled before anything was sent")
   }
   const ovSession = ovSessionId(who.device, who.sessionId)
-  const userSource = sourceId(who.device, who.sessionId, who.turnId, "user")
-  const assistantSource = sourceId(who.device, who.sessionId, who.turnId, "assistant")
-  return store.lockTurn(who.device, who.sessionId, who.turnId, async (current, write) => {
-    if (current && (current.phase === "accepted" || current.phase === "settled")) {
-      return stopResult(settledMessage(current))
-    }
-    let row = current && current.phase === "committing" ? current : {
-      v: 1,
-      ...who,
-      ovSessionId: ovSession,
-      phase: "committing",
-      prompt: promptRow.prompt,
-      assistant,
-      appended: false,
-      userSource,
-      assistantSource,
-      commit: null,
-    }
-    if (row.prompt !== promptRow.prompt) row = { ...row, prompt: promptRow.prompt }
-    row.assistant = assistant
-    await write(row)
-    if (!row.appended) {
-      const existing = await ov.getSession(ovSession, signal).catch(() => null)
-      const already = contains(existing, userSource) && contains(existing, assistantSource)
-      if (!already) {
-        await ov.ensureSession(ovSession, signal)
-        await ov.addPair(ovSession, [
-          { role: "user", content: row.prompt, turn_id: who.turnId, source_message_ids: [userSource] },
-          { role: "assistant", content: assistant, turn_id: who.turnId, source_message_ids: [assistantSource] },
-        ], signal)
+  try {
+    return await store.lockTurn(who.device, who.sessionId, who.turnId, async (current, write) => {
+      if (current && TERMINAL.has(current.phase)) return stopResult(terminalMessage(current, ovSession))
+      const resumed = current && (current.phase === "appended" || current.phase === "append-dispatched" || current.phase === "commit-dispatched")
+      let promptRow = null
+      if (!resumed) {
+        promptRow = await store.readPrompt(who.device, who.sessionId, who.turnId)
+        if (!promptMatches(promptRow, who)) {
+          return stopResult("ov-codex-memory: no matching prompt for this device, session_id and turn_id. The assistant text was not captured.")
+        }
       }
-      row = { ...row, appended: true }
-      await write(row)
+      let row = current && current.phase ? { ...current } : {
+        v: 2,
+        ...who,
+        ovSessionId: ovSession,
+        phase: "armed",
+        prompt: promptRow.prompt,
+        assistant,
+      }
+      if (row.phase === "armed") {
+        row.prompt = promptRow.prompt
+        row.assistant = assistant
+        await write(row)
+        try {
+          await ov.ensureSession(ovSession, signal)
+        } catch (error) {
+          return stopResult("ov-codex-memory: session was not prepared (" + kindOf(error) + "). Nothing was appended. " + clip(error))
+        }
+        if (signal?.aborted) {
+          return stopResult("ov-codex-memory: capture was cancelled before the append. Nothing was appended.")
+        }
+        row = { ...row, phase: "append-dispatched", prompt: promptRow.prompt, assistant }
+        await write(row)
+        try {
+          await ov.addPair(ovSession, [
+            { role: "user", content: row.prompt, turn_id: who.turnId },
+            { role: "assistant", content: assistant, turn_id: who.turnId },
+          ], signal)
+        } catch (error) {
+          if (kindOf(error) === "rejected") {
+            row = { ...row, phase: "armed" }
+            await write(row)
+            return stopResult("ov-codex-memory: OpenViking rejected the append. It was not marked captured. " + clip(error))
+          }
+          row = wipe({ ...row, phase: "ambiguous", reason: "append-outcome-unknown" })
+          await write(row)
+          return stopResult(ambiguousMessage(ovSession, "append"))
+        }
+        row = { ...row, phase: "appended" }
+        await write(row)
+      }
+      if (row.phase === "append-dispatched") {
+        row = wipe({ ...row, phase: "ambiguous", reason: "append-outcome-unknown" })
+        await write(row)
+        return stopResult(ambiguousMessage(ovSession, "append"))
+      }
+      if (row.phase === "appended") {
+        row = { ...row, phase: "commit-dispatched" }
+        await write(wipe(row))
+        let commit
+        try {
+          commit = await ov.commit(ovSession, signal)
+        } catch (error) {
+          row = wipe({ ...row, phase: "ambiguous", reason: "commit-outcome-unknown" })
+          await write(row)
+          return stopResult(ambiguousMessage(ovSession, "commit"))
+        }
+        const definite = commit && typeof commit === "object" && !Array.isArray(commit) && typeof commit.archived === "boolean"
+        if (!definite) {
+          row = wipe({ ...row, phase: "ambiguous", reason: "commit-response-malformed" })
+          await write(row)
+          return stopResult(ambiguousMessage(ovSession, "commit"))
+        }
+        if (commit.archived === true) {
+          const taskId = typeof commit.task_id === "string" && commit.task_id ? commit.task_id : null
+          row = wipe({
+            ...row,
+            phase: "accepted",
+            commit: { status: commit.status || "accepted", archived: true, taskId, extractionComplete: false },
+          })
+          await write(row)
+          const task = taskId
+            ? "Extraction task " + taskId + " is not finished."
+            : "No extraction task id was returned, so extraction is not confirmed."
+          return stopResult("ov-codex-memory: archive accepted. " + task)
+        }
+        row = wipe({
+          ...row,
+          phase: "settled",
+          commit: { status: commit.status || "skipped", archived: false, taskId: null, reason: commit.reason || "not-archived", extractionComplete: false },
+        })
+        await write(row)
+        return stopResult("ov-codex-memory: commit returned archived false (" + (commit.reason || "not-archived") + "). It was not committed again and nothing was marked extracted.")
+      }
+      if (row.phase === "commit-dispatched") {
+        row = wipe({ ...row, phase: "ambiguous", reason: "commit-outcome-unknown" })
+        await write(row)
+        return stopResult(ambiguousMessage(ovSession, "commit"))
+      }
+      return stopResult("ov-codex-memory: this turn is in an unknown local state and was not sent")
+    })
+  } catch (error) {
+    if (error.code === "LEDGER_FULL") {
+      return stopResult("ov-codex-memory: capture ledger is full. This turn was not sent.")
     }
-    const commit = await ov.commit(ovSession, signal)
-    const archived = commit?.archived === true
-    const taskId = typeof commit?.task_id === "string" && commit.task_id ? commit.task_id : null
-    if (archived) {
-      row = { ...row, phase: "accepted", commit: { status: commit.status || "accepted", archived: true, taskId, extractionComplete: false } }
-      await write(row)
-      const task = taskId
-        ? "Extraction task " + taskId + " is not finished."
-        : "No extraction task id was returned, so extraction is not confirmed."
-      return stopResult("ov-codex-memory: archive accepted. " + task)
-    }
-    if (row.appended && commit?.archived === false && commit?.reason === "no_messages") {
-      row = { ...row, phase: "settled", commit: { status: "skipped", archived: false, taskId: null, reason: "no_messages", extractionComplete: false } }
-      await write(row)
-      return stopResult("ov-codex-memory: commit returned no_messages after the pair was already sent. It was not sent again. archived is false; there is no extraction task.")
-    }
-    row = { ...row, phase: "committing", commit: { status: commit?.status || "unknown", archived: false, taskId, reason: commit?.reason || "not-archived", extractionComplete: false } }
-    await write(row)
-    return stopResult("ov-codex-memory: commit did not archive (archived is false). Nothing was marked extracted. Retry the Stop hook to try again.")
-  })
-}
-
-function settledMessage(row) {
-  const commit = row.commit || {}
-  if (commit.archived === true && commit.taskId) {
-    const done = commit.extractionComplete === true ? "finished" : "not finished"
-    return "ov-codex-memory: this turn was already archived. Extraction task " + commit.taskId + " is " + done + ". It was not committed again."
+    throw error
   }
-  return "ov-codex-memory: this turn was already settled (archived " + String(commit.archived === true) + "). It was not committed again."
 }
 
-export async function hookTask(store, ov, args, signal) {
+function wipe(row) {
+  const next = { ...row }
+  delete next.prompt
+  delete next.assistant
+  return next
+}
+
+function ambiguousMessage(ovSession, step) {
+  return "ov-codex-memory: " + step + " outcome is unknown for OpenViking session " + ovSession + ". It was not retried. Reconcile that session by hand. This plugin is at-most-once, not exactly-once."
+}
+
+function terminalMessage(row, ovSession) {
+  if (row.phase === "ambiguous") return ambiguousMessage(ovSession, row.reason || "capture")
+  const commit = row.commit || {}
+  if (row.phase === "accepted" && commit.archived === true) {
+    const task = commit.taskId
+      ? "Extraction task " + commit.taskId + " was not checked again."
+      : "No extraction task id was stored."
+    return "ov-codex-memory: this turn was already archived. " + task + " It was not committed again."
+  }
+  return "ov-codex-memory: this turn was already settled with archived false. It was not committed again."
+}
+
+export async function hookTask(_store, ov, args, signal) {
   const taskId = idOf(args.task_id, "task_id")
   const task = await ov.getTask(taskId, signal)
   const status = typeof task?.status === "string" ? task.status : "unknown"
