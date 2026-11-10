@@ -142,7 +142,19 @@ func TestPluginsImportOnlyCore(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, d := range dirs {
-		if d.IsDir() && d.Name() != "all" && !strings.Contains(string(all), `"`+mod+d.Name()+`"`) {
+		if !d.IsDir() || d.Name() == "all" {
+			continue
+		}
+		// A directory of a portable plugin example has no Go files, so it
+		// is not a built-in plugin and plugins/all does not import it.
+		goFiles, err := filepath.Glob(filepath.Join(root, "plugins", d.Name(), "*.go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(goFiles) == 0 {
+			continue
+		}
+		if !strings.Contains(string(all), `"`+mod+d.Name()+`"`) {
 			t.Errorf("plugins/all doesn't import plugins/%s", d.Name())
 		}
 	}
