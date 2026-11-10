@@ -18,6 +18,7 @@ const MIN_PREFIX = 180
 const MIN_FOCUS = 8
 const MAX_FOCUS = 400
 const MAX_RATIO = 0.4
+const MAX_TAIL = 240
 const MEMORY_URI = "viking://~/memories"
 
 export function queryHash(text) {
@@ -41,29 +42,29 @@ function insideFence(text, index) {
   return open
 }
 
-function lastLineIsShort(text, focus) {
-  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean)
-  if (lines.length < 2 || lines[lines.length - 1] !== focus) return false
-  // The suffix has to be at most half of every earlier line. Equal
-  // paragraphs, short code lines, and a long final question stay whole.
-  return lines.slice(0, -1).every((line) => focus.length * 2 <= line.length)
-}
-
 function accept(text, candidate) {
   const focus = String(candidate || "").trim()
   if (focus.length < MIN_FOCUS || focus.length > MAX_FOCUS) return ""
-  if (!text.endsWith(focus)) return ""
-  const prefix = text.length - focus.length
-  if (prefix < MIN_PREFIX) return ""
+  const at = text.lastIndexOf(focus)
+  if (at < 0) return ""
+  // A later paragraph is part of the request. A short tail on the same
+  // line is a constraint after the question, not a second paragraph.
+  if (text.slice(at + focus.length).split("\n").slice(1).some((line) => line.trim())) return ""
+  if (text.slice(at + focus.length).trim().length > MAX_TAIL) return ""
+  const lastLine = text.split("\n").map((line) => line.trim()).filter(Boolean).pop() || ""
+  if (!lastLine.startsWith(focus)) return ""
+  if (text.slice(0, at).trim().length < MIN_PREFIX) return ""
   if (focus.length / text.length > MAX_RATIO) return ""
-  if (!lastLineIsShort(text, focus)) return ""
+  const earlier = text.split("\n").map((line) => line.trim()).filter(Boolean)
+    .filter((line) => !line.includes(focus))
+  if (earlier.some((line) => focus.length * 2 > line.length)) return ""
   if (!/\p{L}/u.test(focus)) return ""
   if (/^(?:```|[ \t])/.test(focus)) return ""
   if (/[{;\\,]$/.test(focus)) return ""
   return focus
 }
 
-function questionSuffix(text) {
+function questionSpan(text) {
   let end = -1
   for (const mark of ["?", "？", "؟"]) {
     const at = text.lastIndexOf(mark)
@@ -71,13 +72,15 @@ function questionSuffix(text) {
   }
   if (end < 0 || insideFence(text, end)) return ""
   const nl = text.lastIndexOf("\n", end)
-  return text.slice(nl >= 0 ? nl + 1 : 0, end + 1).trim()
+  const lineStart = nl >= 0 ? nl + 1 : 0
+  return text.slice(lineStart, end + 1).trim()
 }
 
 function shortLastLine(text) {
   const lines = text.split("\n").map((line) => line.trim()).filter(Boolean)
   if (lines.length < 3) return ""
   const last = lines[lines.length - 1]
+  if (/[?？؟]/.test(last)) return ""
   const at = text.lastIndexOf(last)
   if (at < 0 || insideFence(text, at)) return ""
   return last
@@ -103,7 +106,7 @@ function questionBeforeLastLine(text) {
 export function focusOf(prompt) {
   const text = String(prompt || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim()
   if (text.length < MIN_PROMPT || hasFenceLine(text)) return ""
-  const asked = accept(text, questionSuffix(text))
+  const asked = accept(text, questionSpan(text))
   if (asked) return asked
   if (questionBeforeLastLine(text)) return ""
   return accept(text, shortLastLine(text))

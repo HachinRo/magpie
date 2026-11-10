@@ -38,10 +38,11 @@ The memory find is scoped to `viking://~/memories` with `context_type`
 query, limits 2, and their own `context_type`, with no memory scope mixed
 in. A short prompt, a single paragraph, any prompt that contains a
 ` ``` ` or `~~~` fence line, a balanced multiline question, and a prompt
-whose question is not the final line are sent whole. A longer prompt is
-also searched as its final line only when that line is a question (`?`,
-`？`, or `؟`) or, if the prompt has no earlier question mark, a short last
-line, and that line is at most half as long as every earlier line. That is
+whose question is not the final line are sent whole. A longer prompt is also searched as the opening of the final paragraph
+through its question mark (`?`, `？`, or `؟`). Up to 240 characters of
+text after that mark, on the same paragraph, stay out of the query. A question followed by a later paragraph is searched whole.
+If the prompt has no question mark, a short last line is used only when
+it is at most half as long as every earlier line. That is
 a structural split, not a model and not a language-specific name list. The
 stored prompt is never replaced by that line. When a suffix is used, a
 memory find of the full prompt (first 4000 characters) starts at the same

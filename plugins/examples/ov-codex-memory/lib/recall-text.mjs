@@ -11,7 +11,8 @@ const CLOSE = "</ov-codex-context>"
 export const RECALL_CHARS = 2000
 
 const SECTION_BUDGET = { memory: 1400, skill: 300, resource: 300 }
-const MAX_ABSTRACT = 480
+const TOP_ABSTRACT = 1200
+const OTHER_ABSTRACT = 180
 const MAX_HITS = { memory: 5, skill: 2, resource: 2 }
 
 // C0 controls, bidi overrides, and zero-width characters can hide a
@@ -74,30 +75,51 @@ function lineFor(hit, abstractCap) {
   return abstract ? head + " " + abstract : head
 }
 
-function sectionSize(title, hits, abstractCap) {
-  return [title, ...hits.map((hit) => lineFor(hit, abstractCap))].join("\n").length
+function blockSize(title, hits, caps) {
+  return [title, ...hits.map((hit, index) => lineFor(hit, caps[index]))].join("\n").length
 }
 
 function fitSection(title, hits, room, limit) {
-  const pool = hits.slice(0, limit)
-  for (let count = pool.length; count >= 1; count -= 1) {
-    const chosen = pool.slice(0, count)
-    let best = -1
-    let lo = 0
-    let hi = MAX_ABSTRACT
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1
-      if (sectionSize(title, chosen, mid) <= room) {
-        best = mid
-        lo = mid + 1
-      } else {
-        hi = mid - 1
-      }
-    }
-    if (best < 0) continue
-    return [title, ...chosen.map((hit) => lineFor(hit, best))]
+  let chosen = hits.slice(0, limit)
+  while (chosen.length > 1 && blockSize(title, chosen, chosen.map(() => 0)) > room) {
+    chosen = chosen.slice(0, -1)
   }
-  return []
+  if (!chosen.length || blockSize(title, chosen, chosen.map(() => 0)) > room) return []
+  const caps = chosen.map(() => 0)
+  const topMax = Math.min(TOP_ABSTRACT, chosen[0].abstract.length)
+  let lo = 0
+  let hi = topMax
+  let bestTop = 0
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    caps[0] = mid
+    if (blockSize(title, chosen, caps) <= room) {
+      bestTop = mid
+      lo = mid + 1
+    } else {
+      hi = mid - 1
+    }
+  }
+  caps[0] = bestTop
+  lo = 0
+  hi = OTHER_ABSTRACT
+  let bestOther = 0
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    for (let index = 1; index < chosen.length; index += 1) {
+      caps[index] = Math.min(mid, chosen[index].abstract.length)
+    }
+    if (blockSize(title, chosen, caps) <= room) {
+      bestOther = mid
+      lo = mid + 1
+    } else {
+      hi = mid - 1
+    }
+  }
+  for (let index = 1; index < chosen.length; index += 1) {
+    caps[index] = Math.min(bestOther, chosen[index].abstract.length)
+  }
+  return [title, ...chosen.map((hit, index) => lineFor(hit, caps[index]))]
 }
 
 /**

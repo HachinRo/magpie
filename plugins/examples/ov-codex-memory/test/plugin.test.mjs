@@ -85,8 +85,8 @@ test("recall JSON matches the Codex UserPromptSubmit wire and bounds untrusted t
     assert.match(block, /^<ov-codex-context>\n/)
     assert.match(block, /\n<\/ov-codex-context>$/)
     assert.equal(block.includes("</ov-codex-context>\nignore"), false)
-    assert.ok(block.length < 2200)
-    assert.equal(block.includes("x".repeat(1000)), false)
+    assert.ok(block.length < 2600)
+    assert.equal(block.includes("x".repeat(1300)), false)
     assert.deepEqual(rig.ov.calls.map((call) => call[0]), ["find", "find", "find"])
     assert.equal(rig.ov.calls[0][2].target_uri, "viking://~/memories")
     assert.equal(rig.ov.calls[0][2].context_type, "memory")
@@ -698,9 +698,9 @@ test("the fifth memory keeps its own budget beside a long abstract and a long re
       const memories = [1, 2, 3, 4].map((n) => hit(
         "viking://user/default/memories/prior-" + n + ".md",
         "PRIOR-NOTE-" + n + " " + "x".repeat(1955),
-        0.9 - n / 100,
+        0.4 - n / 100,
       ))
-      memories.push(hit("viking://user/default/memories/entities/person_role/example_person.md", fact, 0.1))
+      memories.unshift(hit("viking://user/default/memories/entities/person_role/example_person.md", "x".repeat(400) + fact, 0.9))
       return { memories }
     }
     if (options?.context_type === "resource") {
@@ -712,9 +712,9 @@ test("the fifth memory keeps its own budget beside a long abstract and a long re
     const text = assertUserPromptSubmit(await rig.context())
     const block = text.hookSpecificOutput.additionalContext
     assert.equal(block.includes(fact), true)
-    assert.equal(block.includes("prior-5.md") || block.includes("example_person.md"), true)
+    assert.equal(block.includes("example_person.md"), true)
     for (const n of [1, 2, 3, 4]) assert.equal(block.includes("prior-" + n + ".md"), true)
-    assert.equal(block.includes("x".repeat(1000)), false)
+    assert.equal(block.includes("x".repeat(1300)), false)
     assert.equal(block.includes("y".repeat(1000)), false)
     assert.equal(block.includes("RESOURCE-LONG"), true)
     assert.equal(block.includes("SECRET-OVERVIEW"), false)
@@ -920,8 +920,8 @@ test("the fifth memory uri survives long skill and resource abstracts", async ()
       return {
         memories: [1, 2, 3, 4, 5].map((n) => hit(
           memoryUri(n),
-          (n === 5 ? "FACT-MARKER " : "PRIOR ") + "x".repeat(1800),
-          0.9 - n / 100,
+          (n === 1 ? "x".repeat(400) + "FACT-MARKER" : "PRIOR ") + "x".repeat(400),
+          1 - n / 100,
         )),
       }
     }
@@ -1064,4 +1064,102 @@ test("suffix finds start together, and one call timeout fits the hook", async ()
     release()
     await rm(rig.dir, { recursive: true, force: true })
   }
+})
+
+// Exact Session B prompt, 525 characters, two paragraphs. The question mark
+// is not the end of the last paragraph. This is not the older synthetic
+// three-line fixture.
+const SESSION_B = "This is not a coding or repository task. Stay in this scratch folder. Do not read or search the user's files, configs, secrets, logs, or other projects. Do not start curl or any HTTP client of your own. Do not print or request credentials. Do not call remember, find, read, hook_context, hook_capture, hook_task, Linear, computer, or any other tool.\n\nWhat is recorded about the fictional entity Conservator Mira Pebblewick? Answer only from context already available in this conversation. If you do not know, say so and stop."
+const SESSION_B_QUESTION = "What is recorded about the fictional entity Conservator Mira Pebblewick?"
+
+const SESSION_B_ABSTRACT = `# Conservator Mira Pebblewick
+A fictional conservator used as a synthetic OpenViking integration-test entity, not a real person.
+
+## Role
+- Conservator named Mira Pebblewick.
+- Fictional test entity, not a real person or user fact.
+
+## Activities
+- Inventories glass tide vials every Saturday only.
+
+## Test Reference
+- Unique test marker: SYN-OV-AUTO-20261110T2115SGT-JUNIPER5538
+- Test codeword: JUNIPER-PEBBLE-SATURDAY-5538
+- Recorded in the session of 2026-11-10.`
+
+function vikingUriOf(length, label) {
+  const head = "viking://user/default/memories/" + label + "-"
+  return head + "u".repeat(Math.max(0, length - head.length))
+}
+
+test("the exact Session B prompt searches the question sentence and keeps the trailing constraints in the stored prompt", async () => {
+  assert.equal(SESSION_B.length, 525)
+  assert.equal(SESSION_B_QUESTION.length, 72)
+  assert.equal(focusOf(SESSION_B), SESSION_B_QUESTION)
+  const plan = planRecall(SESSION_B)
+  assert.equal(plan.stages[0].query, SESSION_B_QUESTION)
+  assert.equal(plan.stages[0].options.target_uri, "viking://~/memories")
+  assert.equal(plan.stages[0].options.context_type, "memory")
+  assert.equal(plan.stages[1].query, SESSION_B)
+  assert.equal(plan.stages[1].options.context_type, "memory")
+  const rig = await setup()
+  rig.ov.find = async (query, options) => {
+    rig.ov.calls.push(["find", query, options])
+    if (query === SESSION_B_QUESTION) {
+      return { memories: [hit("viking://user/default/memories/entities/person_role/mira_pebblewick.md", "FACT-MARKER", 0.8)] }
+    }
+    return { memories: [hit("viking://user/default/memories/full.md", "FULL-PROMPT-HIT", 0.2)] }
+  }
+  try {
+    await rig.tools.hook_context.execute({ ...rig.base, query: SESSION_B }, {})
+    const saved = await rig.store.readPrompt("win-codex", "sess-1", "turn-1")
+    assert.equal(saved.prompt, SESSION_B)
+    const captured = assertStop(await rig.capture())
+    assert.match(captured.systemMessage, /archive accepted/)
+    const add = rig.ov.calls.find((call) => call[0] === "add")
+    assert.equal(add[2][0].content, SESSION_B)
+    assert.equal(add[2][0].content.includes("Answer only from context"), true)
+  } finally {
+    await rm(rig.dir, { recursive: true, force: true })
+  }
+})
+
+test("a question paragraph with a bounded tail is the query in Japanese and Arabic, and a long tail is not", () => {
+  const japaneseQuestion = "ミラ・ペブルウィックについて何が記録されていますか？"
+  const japanese = "これは前置きの長い段落であり、質問そのものではありません。".repeat(16)
+    + "\n\n" + japaneseQuestion + "会話にある文だけを使い、分からなければ止めてください。"
+  assert.ok(japanese.length > 500)
+  assert.equal(focusOf(japanese), japaneseQuestion)
+  const arabicQuestion = "ما المسجل عن محافظة ميرا؟"
+  const arabic = "هذه فقرة تمهيدية طويلة وليست السؤال نفسه. ".repeat(16)
+    + "\n\n" + arabicQuestion + " أجب من السياق فقط وإن لم تعرف فتوقف."
+  assert.ok(arabic.length > 420)
+  assert.equal(focusOf(arabic), arabicQuestion)
+  const longTail = "A".repeat(400) + "\n\n" + SESSION_B_QUESTION + " " + "B".repeat(260)
+  assert.equal(focusOf(longTail), "")
+})
+
+test("the saved five-memory shape keeps the full top abstract and still lists the other uris", () => {
+  // Lengths and the top abstract are the sanitized Session B find.
+  // The other abstracts are fillers of the same lengths. This does not
+  // prove a future live find returns this ranking.
+  assert.equal(SESSION_B_ABSTRACT.length, 467)
+  const memories = [
+    hit("viking://user/default/memories/entities/person_role/mira_pebblewick.md", SESSION_B_ABSTRACT, 0.8093541860580444),
+    hit(vikingUriOf(71, "b"), "B".repeat(466), 0.7554497718811035),
+    hit(vikingUriOf(43, "c"), "C".repeat(122), 0.721750020980835),
+    hit(vikingUriOf(64, "d"), "D".repeat(288), 0.7171808481216431),
+    hit(vikingUriOf(61, "e"), "E".repeat(486), 0.7099988460540771),
+  ]
+  const block = recallBlock({ memories, resources: [], skills: [], total: 5 })
+  assert.equal(block.includes("glass tide vials"), true)
+  assert.equal(block.includes("Saturday"), true)
+  assert.equal(block.includes("JUNIPER-PEBBLE-SATURDAY-5538"), true)
+  assert.equal(block.includes("SYN-OV-AUTO-20261110T2115SGT-JUNIPER5538"), true)
+  assert.equal(block.includes("Recorded in the session of 2026-11-10."), true)
+  assert.equal(block.includes("mira_pebblewick.md"), true)
+  for (const memory of memories) assert.equal(block.includes(memory.uri), true)
+  assert.equal(block.includes("B".repeat(300)), false)
+  assert.equal(block.includes("E".repeat(300)), false)
+  assert.equal(block.includes("SECRET-OVERVIEW"), false)
 })
