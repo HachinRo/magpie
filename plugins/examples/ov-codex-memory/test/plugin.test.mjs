@@ -297,6 +297,64 @@ test("loopback is required and the OpenViking key is not copied into errors", as
   }
 })
 
+test("empty, missing, and null api_key are loopback with no Authorization header", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ov-nokey-"))
+  try {
+    const file = join(dir, "ovcli.conf")
+    const cases = [
+      { url: "http://127.0.0.1:1933", api_key: "" },
+      { url: "http://127.0.0.1:1933" },
+      { url: "http://127.0.0.1:1933", api_key: null },
+      { url: "http://localhost:1933", api_key: "   " },
+    ]
+    for (const body of cases) {
+      await writeFile(file, JSON.stringify(body))
+      const cfg = await loadConfig({ OPENVIKING_CLI_CONFIG_FILE: file }, {}, dir)
+      assert.equal(cfg.apiKey, "")
+      assert.match(cfg.baseUrl, /^http:\/\/(127\.0\.0\.1|localhost)(:1933)?$/)
+      let seen
+      const client = createClient(cfg, async (_url, init) => {
+        seen = init.headers
+        return { ok: true, status: 200, text: async () => '{"status":"ok","result":{}}' }
+      })
+      await client.find("q")
+      assert.equal(Object.hasOwn(seen, "Authorization"), false)
+      assert.equal(JSON.stringify(seen).includes("Bearer"), false)
+      assert.equal(JSON.stringify(seen).includes("null"), false)
+    }
+    await writeFile(file, JSON.stringify({ url: "http://127.0.0.1:1933", api_key: "  ov-secret  " }))
+    const keyed = await loadConfig({ OPENVIKING_CLI_CONFIG_FILE: file }, {}, dir)
+    assert.equal(keyed.apiKey, "ov-secret")
+    let sent
+    const client = createClient(keyed, async (_url, init) => {
+      sent = init.headers
+      return { ok: false, status: 500, text: async () => "ov-secret in body" }
+    })
+    await assert.rejects(() => client.find("q"), (error) => {
+      assert.equal(sent.Authorization, "Bearer ov-secret")
+      assert.equal(String(error.message).includes("ov-secret"), false)
+      assert.match(error.message, /HTTP 500/)
+      return true
+    })
+    await writeFile(file, JSON.stringify({ url: "http://192.0.2.10:1933", api_key: "" }))
+    await assert.rejects(() => loadConfig({ OPENVIKING_CLI_CONFIG_FILE: file }, {}, dir), /loopback/)
+    await writeFile(file, JSON.stringify({ url: "http://127.0.0.1:1933", api_key: 1 }))
+    await assert.rejects(() => loadConfig({ OPENVIKING_CLI_CONFIG_FILE: file }, {}, dir), (error) => {
+      assert.match(error.message, /api_key must be a single-line string/)
+      assert.equal(String(error.message).includes("1"), false)
+      return true
+    })
+    await writeFile(file, JSON.stringify({ url: "http://127.0.0.1:1933", api_key: "line\nsecret" }))
+    await assert.rejects(() => loadConfig({ OPENVIKING_CLI_CONFIG_FILE: file }, {}, dir), (error) => {
+      assert.match(error.message, /single-line/)
+      assert.equal(String(error.message).includes("secret"), false)
+      return true
+    })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test("the package is tools only and does not name the existing OpenViking tools", async () => {
   const pkg = JSON.parse(await readFile(new URL("./package.json", root), "utf8"))
   assert.equal(pkg.magpie.hooks, undefined)

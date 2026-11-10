@@ -26,14 +26,17 @@ export function createClient(cfg, fetchImpl = globalThis.fetch) {
     signal?.addEventListener("abort", onAbort, { once: true })
     let response
     try {
+      const headers = {
+        Accept: "application/json",
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      }
+      // Official loopback dev mode has an empty api_key. Sending
+      // "Bearer " or "Bearer null" would be a fake credential.
+      if (typeof cfg.apiKey === "string" && cfg.apiKey) headers.Authorization = "Bearer " + cfg.apiKey
       response = await fetchImpl(cfg.baseUrl + path, {
         method,
         redirect: "error",
-        headers: {
-          Accept: "application/json",
-          Authorization: "Bearer " + cfg.apiKey,
-          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        },
+        headers,
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: timer.signal,
       })

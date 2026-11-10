@@ -65,10 +65,19 @@ magpie plugin add /absolute/path/to/plugins/examples/ov-codex-memory
 Leave it on. The plugin host loads tools from `index.mjs`. There is no
 `magpie.hooks` entry.
 
-OpenViking's URL and API key stay in `~/.openviking/ovcli.conf` (or
+OpenViking's URL stays in `~/.openviking/ovcli.conf` (or
 `OPENVIKING_CLI_CONFIG_FILE`) on that computer. The URL must be loopback:
-`127.0.0.1`, `localhost`, or `::1`. A LAN or public URL is refused. Redirects
-are refused. Do not put a Magpie gateway key in the plugin options.
+`127.0.0.1`, `localhost`, or `::1`. A LAN or public URL is refused even when
+`api_key` is empty. Redirects are refused.
+
+An empty, missing, or JSON null `api_key` is the official no-key loopback
+client (OpenViking `auth_mode: dev` accepts this, and the official Magpie
+plugin omits `Authorization` when the key is empty). This plugin does the
+same: no `Authorization` header, and not `Bearer `, `Bearer null`, or a
+whitespace token. A non-empty key is trimmed and sent only as
+`Authorization: Bearer <key>`. A non-string key, or one with a line break,
+is refused without the value being copied into the error. Do not put a
+Magpie gateway key in the plugin options.
 
 Optional plugin options:
 
@@ -162,9 +171,14 @@ from a failed Stop is not marked captured.
 
 ## Tests
 
+This package's install archive includes `test/plugin.test.mjs`. From the
+extracted package directory:
+
 ```sh
-node --test plugins/examples/ov-codex-memory/test/plugin.test.mjs
+node --test test/plugin.test.mjs
 ```
 
-The tests use a fake OpenViking client and one local hung HTTP server. They
-do not call a real OpenViking, a real Codex, or a live Magpie.
+The same file in the git tree is
+`plugins/examples/ov-codex-memory/test/plugin.test.mjs`. The tests use a fake
+OpenViking client and one local hung HTTP server. They do not call a real
+OpenViking, a real Codex, or a live Magpie.
