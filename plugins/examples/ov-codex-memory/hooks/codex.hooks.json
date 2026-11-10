@@ -1,0 +1,42 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "REPLACE_WITH_THE_HUB_SERVER_NAME_ALREADY_IN_CODEX",
+            "tool": "ov-codex-memory__hook_context",
+            "input": {
+              "query": "${prompt}",
+              "session_id": "${session_id}",
+              "turn_id": "${turn_id}",
+              "device": "win-codex"
+            },
+            "timeout": 20,
+            "statusMessage": "Recalling OpenViking context"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "REPLACE_WITH_THE_HUB_SERVER_NAME_ALREADY_IN_CODEX",
+            "tool": "ov-codex-memory__hook_capture",
+            "input": {
+              "session_id": "${session_id}",
+              "turn_id": "${turn_id}",
+              "device": "win-codex",
+              "assistant": "${last_assistant_message}"
+            },
+            "timeout": 20,
+            "statusMessage": "Capturing the finished turn"
+          }
+        ]
+      }
+    ]
+  }
+}

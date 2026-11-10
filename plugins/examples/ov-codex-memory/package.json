@@ -1,0 +1,10 @@
+{
+  "name": "ov-codex-memory",
+  "version": "0.1.6",
+  "private": true,
+  "type": "module",
+  "description": "Tools-only Magpie plugin: Codex mcp_tool hooks recall and capture through the existing Magpie MCP hub. No gateway hooks.",
+  "main": "index.mjs",
+  "files": ["index.mjs", "lib", "hooks", "test", "README.md", "package.json"],
+  "magpie": {}
+}
