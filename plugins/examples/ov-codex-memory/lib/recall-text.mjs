@@ -68,11 +68,40 @@ export function byScore(hits) {
     .map((row) => row.hit)
 }
 
+function clipText(text, cap) {
+  if (text.length <= cap) return text
+  if (cap < 24) return text.slice(0, cap)
+  const cut = text.slice(0, cap)
+  const space = Math.max(cut.lastIndexOf(" "), cut.lastIndexOf("\n"))
+  if (space >= Math.floor(cap * 0.6)) return cut.slice(0, space)
+  return cut
+}
+
 function lineFor(hit, abstractCap) {
-  const abstract = hit.abstract.slice(0, abstractCap)
+  const source = hit.detail || hit.abstract
+  const abstract = clipText(source, abstractCap)
   const score = hit.score == null ? "" : " score=" + hit.score.toFixed(3)
   const head = "- uri=" + (hit.uri || "(none)") + score
   return abstract ? head + " " + abstract : head
+}
+
+/** File body used in place of a short find abstract. Oversized text is refused. */
+export function fileDetail(text) {
+  if (typeof text !== "string" || text.length > 8000) return ""
+  const clean = neutralize(text)
+  if (!clean) return ""
+  return clean.length > 700 ? clipText(clean, 700) : clean
+}
+
+/** A memory file the server can read. Directories, sidecars, and other scopes are not. */
+export function memoryFileUri(uri) {
+  if (typeof uri !== "string") return ""
+  if (!uri.startsWith("viking://") || uri.length > 300) return ""
+  if (/[\s@?#]|%|\.\.|\\/.test(uri)) return ""
+  if (!uri.includes("/memories/") || uri.includes("/sessions/")) return ""
+  if (uri.endsWith("/") || uri.endsWith(".abstract.md") || uri.endsWith(".overview.md")) return ""
+  if (!uri.endsWith(".md")) return ""
+  return uri
 }
 
 function blockSize(title, hits, caps) {
@@ -86,38 +115,29 @@ function fitSection(title, hits, room, limit) {
   }
   if (!chosen.length || blockSize(title, chosen, chosen.map(() => 0)) > room) return []
   const caps = chosen.map(() => 0)
-  const topMax = Math.min(TOP_ABSTRACT, chosen[0].abstract.length)
-  let lo = 0
-  let hi = topMax
-  let bestTop = 0
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1
-    caps[0] = mid
-    if (blockSize(title, chosen, caps) <= room) {
-      bestTop = mid
-      lo = mid + 1
-    } else {
-      hi = mid - 1
+  const grow = (index, ceiling) => {
+    const text = chosen[index].detail || chosen[index].abstract || ""
+    let lo = 0
+    let hi = Math.min(ceiling, text.length)
+    let best = 0
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      caps[index] = mid
+      if (blockSize(title, chosen, caps) <= room) {
+        best = mid
+        lo = mid + 1
+      } else {
+        hi = mid - 1
+      }
     }
+    caps[index] = best
   }
-  caps[0] = bestTop
-  lo = 0
-  hi = OTHER_ABSTRACT
-  let bestOther = 0
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1
-    for (let index = 1; index < chosen.length; index += 1) {
-      caps[index] = Math.min(mid, chosen[index].abstract.length)
-    }
-    if (blockSize(title, chosen, caps) <= room) {
-      bestOther = mid
-      lo = mid + 1
-    } else {
-      hi = mid - 1
-    }
+  for (let index = 0; index < chosen.length; index += 1) {
+    if (chosen[index].detail) grow(index, 700)
   }
-  for (let index = 1; index < chosen.length; index += 1) {
-    caps[index] = Math.min(bestOther, chosen[index].abstract.length)
+  for (let index = 0; index < chosen.length; index += 1) {
+    if (chosen[index].detail) continue
+    grow(index, index === 0 ? TOP_ABSTRACT : OTHER_ABSTRACT)
   }
   return [title, ...chosen.map((hit, index) => lineFor(hit, caps[index]))]
 }

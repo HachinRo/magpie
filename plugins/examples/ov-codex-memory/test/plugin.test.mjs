@@ -10,7 +10,7 @@ import { createClient } from "../lib/http.mjs"
 import { assertLoopback } from "../lib/loopback.mjs"
 import { OvError } from "../lib/http.mjs"
 import { focusOf, planRecall } from "../lib/recall-query.mjs"
-import { recallBlock } from "../lib/recall-text.mjs"
+import { memoryFileUri, recallBlock } from "../lib/recall-text.mjs"
 import { createStore, ovSessionId } from "../lib/store.mjs"
 import { createTools } from "../lib/tools.mjs"
 
@@ -1162,4 +1162,111 @@ test("the saved five-memory shape keeps the full top abstract and still lists th
   assert.equal(block.includes("B".repeat(300)), false)
   assert.equal(block.includes("E".repeat(300)), false)
   assert.equal(block.includes("SECRET-OVERVIEW"), false)
+})
+
+test("a short find abstract is replaced by the memory file, and other scopes are not read", async () => {
+  // Shape from the 0.1.4 Windows recall: find named the entity and returned
+  // a generic blurb; the durable fact was in the file read, not that blurb.
+  // The strings are fixture data. They do not prove a live find.
+  const generic = "A fictional archivist used as a synthetic OpenViking automatic-memory performance-test entity."
+  const fact = "Catalogs river-reed folios every Wednesday only. Marker SYN-OV-PERF-20261110T2259SGT-FENNEL7042. Codeword FENNEL-NETTLE-WEDNESDAY-7042."
+  const file = "# Archivist Example\n\n" + generic + "\n\n## Activities\n- " + fact + "\n"
+  const top = "viking://user/default/memories/entities/person_role/example_archivist.md"
+  const second = "viking://user/default/memories/entities/person_role/example_other.md"
+  const rig = await setup()
+  const reads = []
+  rig.ov.readMemory = async (uri) => {
+    reads.push(uri)
+    if (uri === top) return file
+    if (uri === second) return "Second file body that is longer than its abstract and stays bounded."
+    throw new Error("unexpected uri")
+  }
+  rig.ov.find = async (query, options) => {
+    rig.ov.calls.push(["find", query, options])
+    if (options?.context_type === "memory") {
+      return {
+        memories: [
+          hit(top, generic, 0.9),
+          hit(second, "Other generic blurb.", 0.8),
+          hit("viking://user/default/memories/entities/person_role/", "directory", 0.7),
+          hit("viking://user/default/memories/entities/person_role/third.md", "Third " + "t".repeat(400), 0.6),
+          hit("viking://user/default/skills/secret/SKILL.md", "skill abstract", 0.95),
+        ],
+      }
+    }
+    if (options?.context_type === "resource") {
+      return { resources: [hit("viking://resources/notes/secret.md", "resource", 0.99)] }
+    }
+    return { skills: [hit("viking://user/default/skills/other/SKILL.md", "skill", 0.5)] }
+  }
+  try {
+    const text = assertUserPromptSubmit(await rig.context())
+    const block = text.hookSpecificOutput.additionalContext
+    assert.equal(block.includes(fact), true)
+    assert.equal(block.includes("FENNEL-NETTLE-WEDNESDAY-7042"), true)
+    assert.equal(block.includes("example_archivist.md"), true)
+    assert.equal(block.includes("example_other.md"), true)
+    assert.equal(block.includes("Second file body"), true)
+    assert.equal(block.includes("t".repeat(300)), false)
+    assert.deepEqual(reads, [top, second])
+    assert.match(text.systemMessage, /read:ok:2/)
+    assert.equal(text.systemMessage.includes(fact), false)
+    assert.equal(memoryFileUri("viking://user/default/memories/../../etc/passwd.md"), "")
+    assert.equal(memoryFileUri("viking://user:secret@host/memories/a.md"), "")
+    assert.equal(memoryFileUri("viking://user/default/memories/entities/person_role/.abstract.md"), "")
+  } finally {
+    await rm(rig.dir, { recursive: true, force: true })
+  }
+})
+
+test("a failed or oversized memory read keeps the find abstract", async () => {
+  const rig = await setup()
+  const uri = "viking://user/default/memories/entities/person_role/example_archivist.md"
+  rig.ov.readMemory = async () => {
+    throw new OvError("ov-codex-memory: OpenViking HTTP 400", "rejected", 400)
+  }
+  rig.ov.find = async (query, options) => {
+    rig.ov.calls.push(["find", query, options])
+    if (options?.context_type !== "memory") return {}
+    return { memories: [hit(uri, "GENERIC-BLURB-ONLY", 0.8)] }
+  }
+  try {
+    const failed = assertUserPromptSubmit(await rig.context())
+    assert.equal(failed.hookSpecificOutput.additionalContext.includes("GENERIC-BLURB-ONLY"), true)
+    assert.match(failed.systemMessage, /read:fallback:0/)
+    rig.ov.readMemory = async () => "Z".repeat(9000)
+    const huge = assertUserPromptSubmit(await rig.context({ turn_id: "turn-2" }))
+    assert.equal(huge.hookSpecificOutput.additionalContext.includes("GENERIC-BLURB-ONLY"), true)
+    assert.equal(huge.hookSpecificOutput.additionalContext.includes("Z".repeat(100)), false)
+  } finally {
+    await rm(rig.dir, { recursive: true, force: true })
+  }
+})
+
+test("content read is a capped GET and find still cannot ask for read_content", async () => {
+  let seen
+  const client = createClient(
+    { baseUrl: "http://127.0.0.1:1933", apiKey: "", timeoutMs: 8000 },
+    async (url) => {
+      seen = url
+      const body = "# File\n\n" + "A fact that is only in the file.\n"
+      return { ok: true, status: 200, text: async () => JSON.stringify({ status: "ok", result: body }) }
+    },
+  )
+  const text = await client.readMemory("viking://user/default/memories/entities/person_role/example.md")
+  assert.equal(text.includes("only in the file"), true)
+  assert.equal(seen.includes("/api/v1/content/read?"), true)
+  assert.equal(seen.includes("offset=0"), true)
+  assert.equal(seen.includes("limit=40"), true)
+  assert.equal(seen.includes("raw="), false)
+  assert.equal(seen.includes("example.md"), true)
+  const tooBig = createClient(
+    { baseUrl: "http://127.0.0.1:1933", apiKey: "", timeoutMs: 8000 },
+    async () => ({ ok: true, status: 200, text: async () => "x".repeat(13000) }),
+  )
+  await assert.rejects(() => tooBig.readMemory("viking://user/default/memories/a.md"), (error) => {
+    assert.equal(error.message.includes("x".repeat(20)), false)
+    assert.match(error.message, /too large/)
+    return true
+  })
 })

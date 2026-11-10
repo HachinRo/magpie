@@ -19,7 +19,7 @@ function scrub(text, apiKey) {
 }
 
 export function createClient(cfg, fetchImpl = globalThis.fetch) {
-  async function call(path, { method = "GET", body, signal, timeoutMs } = {}) {
+  async function call(path, { method = "GET", body, signal, timeoutMs, maxChars } = {}) {
     const timer = new AbortController()
     const timerId = setTimeout(() => timer.abort(), timeoutMs || cfg.timeoutMs)
     const onAbort = () => timer.abort()
@@ -64,6 +64,9 @@ export function createClient(cfg, fetchImpl = globalThis.fetch) {
       const kind = AMBIGUOUS_STATUS.has(response.status) ? "ambiguous" : "rejected"
       throw new OvError("ov-codex-memory: OpenViking HTTP " + response.status, kind, response.status)
     }
+    if (text.length > (maxChars || 2000000)) {
+      throw new OvError("ov-codex-memory: OpenViking response was too large", "rejected", response.status)
+    }
     if (!text) return {}
     try {
       const parsed = JSON.parse(text)
@@ -92,6 +95,18 @@ export function createClient(cfg, fetchImpl = globalThis.fetch) {
         if (typeof options.context_type === "string" && options.context_type) body.context_type = options.context_type
       }
       return call("/api/v1/search/find", { method: "POST", body, signal })
+    },
+    // L2 file body. File URIs only; the server rejects a directory. raw is
+    // not set, so the default sanitizer stays on. The line limit and the
+    // response cap keep one read from becoming the whole hook budget.
+    readMemory(uri, signal) {
+      const path = "/api/v1/content/read?uri=" + encodeURIComponent(uri) + "&offset=0&limit=40"
+      return call(path, {
+        method: "GET",
+        signal,
+        timeoutMs: Math.min(cfg.timeoutMs, 2000),
+        maxChars: 12000,
+      })
     },
     ensureSession(sessionId, signal) {
       return call("/api/v1/sessions", {

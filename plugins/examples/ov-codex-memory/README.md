@@ -27,8 +27,8 @@ Recalled text is untrusted data inside that delimiter. The body is at most
 crowd out a later one. Memories, skills, and resources are separate
 sections. A hit shows its `viking://` uri and its abstract. Overview and
 file content are not copied into the block. The model can open a uri with
-the existing OpenViking read tool. This plugin does not read those files
-and does not run commands found in notes. Tags that would close the
+the existing OpenViking read tool. This plugin reads at most two memory
+files itself, and it does not run commands found in notes. Tags that would close the
 delimiter are neutralized. The search body is not returned raw: Codex
 rejects unexpected fields (`deny_unknown_fields` on
 `UserPromptSubmitCommandOutputWire`).
@@ -52,10 +52,17 @@ suffix find already returned memories. `search`, including
 the query it is given, it rejects `target_uri`, and session expansion or
 rewrite can call the server's planner. Those model calls stay off.
 
-The finds start together. Each call uses `timeoutMs` (default 8000,
-allowed 100 to 15000). The recall wait is one `timeoutMs`, not that value
-times the number of calls. The sample Codex hook allows 20 seconds, so
-the default 8 seconds and the maximum 15 seconds both finish inside it.
+The finds start together. Each find uses `timeoutMs` (default 8000,
+allowed 100 to 15000). After those finds return, at most two memory
+files are read together with `GET /api/v1/content/read?uri=...&offset=0&limit=40`.
+`raw` is not sent. Each read waits at most 2 seconds and refuses a body
+over 12000 characters. A file body longer than the find abstract replaces
+it, and that text is capped at 700 characters. A failed, directory, or
+oversized read keeps the abstract. Skills, resources, directory URIs, and
+`.abstract.md` / `.overview.md` sidecars are not read. The find wave is
+one `timeoutMs`. The reads add at most 2 seconds. The sample Codex hook
+allows 20 seconds, so the default 8 seconds and the maximum 15 seconds,
+plus the read, finish inside it.
 Capture is unchanged and is three calls in sequence (session, append,
 commit). Three defaults are 24 seconds and three maxima are 45 seconds,
 both longer than the 20 second Stop hook. A slow capture can be cut off.

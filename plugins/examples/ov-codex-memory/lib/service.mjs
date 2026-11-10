@@ -1,7 +1,7 @@
 import { deviceOf, idOf, textOf } from "./ids.mjs"
 import { stopResult, userPromptSubmit } from "./codex.mjs"
 import { planRecall, queryHash } from "./recall-query.mjs"
-import { byScore, hitsFrom, renderRecall } from "./recall-text.mjs"
+import { byScore, fileDetail, hitsFrom, memoryFileUri, renderRecall } from "./recall-text.mjs"
 import { ovSessionId } from "./store.mjs"
 
 const MAX_TEXT = 16000
@@ -31,6 +31,30 @@ function promptMatches(row, who) {
     && row.turnId === who.turnId
     && typeof row.prompt === "string"
     && row.prompt.trim().length > 0
+}
+
+async function readTopMemories(ov, hits, signal) {
+  if (typeof ov.readMemory !== "function" || signal?.aborted) return { kind: "na", count: 0 }
+  const targets = []
+  for (const hit of hits) {
+    if (!memoryFileUri(hit.uri)) continue
+    targets.push(hit)
+    if (targets.length === 2) break
+  }
+  if (!targets.length) return { kind: "na", count: 0 }
+  const settled = await Promise.all(targets.map(async (hit) => {
+    try {
+      const body = await ov.readMemory(hit.uri, signal)
+      const detail = fileDetail(body)
+      if (!detail || detail.length < hit.abstract.length) return false
+      hit.detail = detail
+      return true
+    } catch {
+      return false
+    }
+  }))
+  const count = settled.filter(Boolean).length
+  return { kind: count ? "ok" : "fallback", count }
 }
 
 function withOneBackup(primary, backup) {
@@ -88,8 +112,10 @@ export async function hookContext(store, ov, args, signal) {
   const memoryHits = memory.ok && memory.hits.length
     ? withOneBackup(memory.hits, backup.hits)
     : backup.hits
+  const rankedMemories = byScore(memoryHits).slice(0, 5)
+  const read = await readTopMemories(ov, rankedMemories, signal)
   const rendered = renderRecall({
-    memories: byScore(memoryHits).slice(0, 5),
+    memories: rankedMemories,
     skills: byScore(skill.hits).slice(0, 2),
     resources: byScore(resource.hits).slice(0, 2),
   })
@@ -109,6 +135,7 @@ export async function hookContext(store, ov, args, signal) {
   const uris = rendered.uris.slice(0, 5).map((uri) => uri.replaceAll(",", "%2C")).join(",")
   let message = head + " " + summary + " focus:" + (plan.focus ? "1" : "0") + " qh:" + hashes.join(",")
   if (uris) message += " uri:" + uris
+  message += " read:" + read.kind + ":" + read.count
   if (!saved.stored && saved.reason === "full") {
     message = "ov-codex-memory: prompt store is full, so this prompt was not saved and will not be captured. " + message
   }
