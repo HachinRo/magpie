@@ -12,14 +12,17 @@ export const RECALL_CHARS = 2000
 
 const SECTION_BUDGET = { memory: 1400, skill: 300, resource: 300 }
 const MAX_ABSTRACT = 480
-const MIN_ABSTRACT = 80
 const MAX_HITS = { memory: 5, skill: 2, resource: 2 }
+
+// C0 controls, bidi overrides, and zero-width characters can hide a
+// closing delimiter or reorder the line. They are removed before display.
+const HIDDEN = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g
 
 function neutralize(value) {
   return String(value)
+    .replace(HIDDEN, "")
     .split(OPEN).join("ov-codex-context")
     .split(CLOSE).join("ov-codex-context")
-    .split("\u0000").join("")
     .replace(/\s+/g, " ")
     .trim()
 }
@@ -27,8 +30,10 @@ function neutralize(value) {
 function vikingUri(value) {
   if (typeof value !== "string") return ""
   const uri = value.trim()
-  if (!uri.startsWith("viking://") || uri.length > 300 || /[\s\u0000]/.test(uri)) return ""
-  return neutralize(uri)
+  if (!uri.startsWith("viking://") || uri.length > 300) return ""
+  if (/[\s@]/.test(uri) || uri.includes(OPEN) || uri.includes(CLOSE)) return ""
+  if (uri.replace(HIDDEN, "") !== uri) return ""
+  return uri
 }
 
 export function hitsFrom(body, bucket) {
@@ -90,7 +95,6 @@ function fitSection(title, hits, room, limit) {
       }
     }
     if (best < 0) continue
-    if (best < MIN_ABSTRACT && count > 1) continue
     return [title, ...chosen.map((hit) => lineFor(hit, best))]
   }
   return []

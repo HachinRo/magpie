@@ -33,6 +33,16 @@ function promptMatches(row, who) {
     && row.prompt.trim().length > 0
 }
 
+function withOneBackup(primary, backup) {
+  const ranked = byScore(primary)
+  const seen = new Set(ranked.map((hit) => hit.uri).filter(Boolean))
+  for (const hit of byScore(backup)) {
+    if (hit.uri && seen.has(hit.uri)) continue
+    return ranked.concat(hit)
+  }
+  return ranked
+}
+
 function redactQueries(message, queries) {
   let out = message
   const secrets = queries.filter((query) => typeof query === "string" && query.length >= 8)
@@ -65,21 +75,19 @@ export async function hookContext(store, ov, args, signal) {
   }
   const saved = await store.savePrompt(who.device, who.sessionId, who.turnId, prompt)
   const plan = planRecall(prompt)
-  const primary = plan.stages.filter((stage) => stage.name !== "memory-full")
-  const fallback = plan.stages.find((stage) => stage.name === "memory-full")
-  const ran = await Promise.all(primary.map((stage) => runFind(ov, stage, signal)))
+  // Every find starts together. The wait is one OpenViking timeout, not
+  // one timeout per call. A nonempty focus result does not cancel the
+  // full-prompt memory find.
+  const ran = await Promise.all(plan.stages.map((stage) => runFind(ov, stage, signal)))
   const memory = ran.find((stage) => stage.name === "memory")
-  let backup
-  if (!fallback) {
-    backup = { name: "memory-full", ok: true, kind: "na", count: 0, hits: [], qhash: "" }
-  } else if (signal?.aborted || (memory.ok && memory.hits.length > 0)) {
-    backup = { name: "memory-full", ok: true, kind: "skip", count: 0, hits: [], qhash: queryHash(fallback.query) }
-  } else {
-    backup = await runFind(ov, fallback, signal)
+  const backup = ran.find((stage) => stage.name === "memory-full") || {
+    name: "memory-full", ok: true, kind: "na", count: 0, hits: [], qhash: "",
   }
   const skill = ran.find((stage) => stage.name === "skill")
   const resource = ran.find((stage) => stage.name === "resource")
-  const memoryHits = memory.ok && memory.hits.length ? memory.hits : backup.hits
+  const memoryHits = memory.ok && memory.hits.length
+    ? withOneBackup(memory.hits, backup.hits)
+    : backup.hits
   const rendered = renderRecall({
     memories: byScore(memoryHits).slice(0, 5),
     skills: byScore(skill.hits).slice(0, 2),

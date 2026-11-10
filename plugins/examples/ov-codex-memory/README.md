@@ -36,17 +36,29 @@ rejects unexpected fields (`deny_unknown_fields` on
 The memory find is scoped to `viking://~/memories` with `context_type`
 `memory` and `limit` 5. Skill and resource finds use the same primary
 query, limits 2, and their own `context_type`, with no memory scope mixed
-in. A short prompt, a single paragraph, a fenced block with short lines,
-and a balanced multiline question are sent whole. A longer prompt is also
-searched as its final line only when that line is a question or a short
-last line, and it is at most half as long as every earlier line. That is a
-structural split, not a model and not a language-specific name list. The
-stored prompt is never replaced by that line. If the short find returns no
-memories or fails, one memory find of the full prompt (first 4000
-characters) runs as a fallback. `search`, including `mode=context`, is not
-called: on 0.5.4 that mode still vector-searches the query it is given, it
-rejects `target_uri`, and session expansion or rewrite can call the
-server's planner. Those model calls stay off.
+in. A short prompt, a single paragraph, any prompt that contains a
+` ``` ` or `~~~` fence line, a balanced multiline question, and a prompt
+whose question is not the final line are sent whole. A longer prompt is
+also searched as its final line only when that line is a question (`?`,
+`？`, or `؟`) or, if the prompt has no earlier question mark, a short last
+line, and that line is at most half as long as every earlier line. That is
+a structural split, not a model and not a language-specific name list. The
+stored prompt is never replaced by that line. When a suffix is used, a
+memory find of the full prompt (first 4000 characters) starts at the same
+time. One non-duplicate hit from that find is kept, including when the
+suffix find already returned memories. `search`, including
+`mode=context`, is not called: on 0.5.4 that mode still vector-searches
+the query it is given, it rejects `target_uri`, and session expansion or
+rewrite can call the server's planner. Those model calls stay off.
+
+The finds start together. Each call uses `timeoutMs` (default 8000,
+allowed 100 to 15000). The recall wait is one `timeoutMs`, not that value
+times the number of calls. The sample Codex hook allows 20 seconds, so
+the default 8 seconds and the maximum 15 seconds both finish inside it.
+Capture is unchanged and is three calls in sequence (session, append,
+commit). Three defaults are 24 seconds and three maxima are 45 seconds,
+both longer than the 20 second Stop hook. A slow capture can be cut off.
+The at-most-once flags still apply on a later Stop.
 
 `systemMessage` records stage, status, counts, whether a focus query was
 used, a 16-character hash of each query that was sent, and the injected
@@ -200,7 +212,9 @@ request returned.
 
 - Recall is scoped `find`, not `search` and not context mode. Context mode
   would not by itself fix an instruction-heavy query, because 0.5.4 still
-  embeds the query it is given.
+  embeds the query it is given. Recall's wall clock is one `timeoutMs`
+  (default 8000, maximum 15000) against the sample hook's 20 seconds.
+  Capture's three sequential calls can exceed those 20 seconds.
 - Pairing is the device label plus `session_id` plus `turn_id`. The stored
   prompt record must carry those same three values. A mismatch does not
   capture.

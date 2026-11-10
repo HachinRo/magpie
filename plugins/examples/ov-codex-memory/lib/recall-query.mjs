@@ -24,17 +24,21 @@ export function queryHash(text) {
   return createHash("sha256").update(String(text), "utf8").digest("hex").slice(0, 16)
 }
 
-function fenceCount(text) {
-  const marks = text.match(/```/g)
-  return marks ? marks.length : 0
+function fenceLine(line) {
+  return /^\s*(?:```|~~~)/.test(line)
 }
 
-function unclosedFence(text) {
-  return fenceCount(text) % 2 === 1
+function hasFenceLine(text) {
+  return text.split("\n").some(fenceLine)
 }
 
 function insideFence(text, index) {
-  return fenceCount(text.slice(0, index)) % 2 === 1
+  const lines = text.slice(0, index).split("\n")
+  let open = false
+  for (let i = 0; i < lines.length - 1; i += 1) {
+    if (fenceLine(lines[i])) open = !open
+  }
+  return open
 }
 
 function lastLineIsShort(text, focus) {
@@ -79,11 +83,30 @@ function shortLastLine(text) {
   return last
 }
 
-/** Short retrieval suffix, or "" when the whole prompt should be searched. */
+function questionBeforeLastLine(text) {
+  const lines = text.split("\n")
+  let start = 0
+  let lastStart = 0
+  for (const line of lines) {
+    if (line.trim()) lastStart = start
+    start += line.length + 1
+  }
+  const head = text.slice(0, lastStart)
+  return ["?", "？", "؟"].some((mark) => head.includes(mark))
+}
+
+/**
+ * Short retrieval suffix, or "" when the whole prompt should be searched.
+ * A question that is not the final line is not replaced by a later
+ * instruction line. A fenced block is not split.
+ */
 export function focusOf(prompt) {
   const text = String(prompt || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim()
-  if (text.length < MIN_PROMPT || unclosedFence(text)) return ""
-  return accept(text, questionSuffix(text)) || accept(text, shortLastLine(text))
+  if (text.length < MIN_PROMPT || hasFenceLine(text)) return ""
+  const asked = accept(text, questionSuffix(text))
+  if (asked) return asked
+  if (questionBeforeLastLine(text)) return ""
+  return accept(text, shortLastLine(text))
 }
 
 function stage(name, query, bucket, options) {
@@ -93,8 +116,9 @@ function stage(name, query, bucket, options) {
 /**
  * Read-only find plan. Memory is scoped to viking://~/memories.
  * Skills and resources are separate finds on the same primary query.
- * The full prompt is a memory fallback stage, run only when a focus
- * query returns nothing or fails. It is not a second planner.
+ * When a focus exists, the full prompt is a second memory find started
+ * at the same time. A nonempty focus result does not cancel it. It is
+ * not a second planner.
  */
 export function planRecall(prompt) {
   const stored = String(prompt || "").trim()
